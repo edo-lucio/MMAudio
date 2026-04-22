@@ -55,6 +55,19 @@ sampling:
 null_condition_probability: 0.1
 cfg_strength: 4.5
 
+# Gromov-Wasserstein regularization
+gw_regularization:
+  enabled: false
+  variant: global           # global | projected | c_g | fused
+  lambda_gw: 0.01
+  num_sinkhorn_iter: 5
+  epsilon: 0.1
+  detach_video: true
+  alpha: 0.5                # FGW mixing
+  warmup_steps: 1000
+  schedule: constant        # constant | linear_rampup | cosine_anneal
+  save_couplings: false     # save T* during eval (used by analyze_couplings.py)
+
 # checkpoint paths to external modules
 vae_16k_ckpt: ./ext_weights/v1-16.pth
 vae_44k_ckpt: ./ext_weights/v1-44.pth

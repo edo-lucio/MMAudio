@@ -16,6 +16,7 @@ from omegaconf import DictConfig
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from mmaudio.model.flow_matching import FlowMatching
+from mmaudio.model.gw_regularization import compute_gw_regularization, lambda_schedule
 from mmaudio.model.networks import get_my_mmaudio
 from mmaudio.model.sequence_config import CONFIG_16K, CONFIG_44K
 from mmaudio.model.utils.features_utils import FeaturesUtils
@@ -117,6 +118,10 @@ class Runner:
         self.log_normal_sampling_scale = cfg.sampling.scale
         self.null_condition_probability = cfg.null_condition_probability
         self.cfg_strength = cfg.cfg_strength
+
+        # GW regularization
+        self.gw_cfg = cfg.get('gw_regularization', None)
+        self.gw_enabled = bool(self.gw_cfg) and bool(self.gw_cfg.get('enabled', False))
 
         # setting up logging
         self.log = log
@@ -302,9 +307,43 @@ class Runner:
                 unmasked_clip_f = clip_f.clone()
                 unmasked_sync_f = sync_f.clone()
                 unmasked_text_f = text_f.clone()
+
+            # snapshot pre-CFG-null clip_f for GW (train_fn mutates in place)
+            gw_clip_f = clip_f.clone() if self.gw_enabled else None
+
             x1, loss, mean_loss, t = self.train_fn(clip_f, sync_f, text_f, a_mean, a_std)
 
             self.train_integrator.add_dict({'loss': mean_loss})
+
+            # GW regularization (outside train_fn so it's not torch.compiled)
+            total_loss = mean_loss
+            if self.gw_enabled:
+                eff_lambda = lambda_schedule(
+                    it,
+                    base=self.gw_cfg.lambda_gw,
+                    warmup_steps=self.gw_cfg.warmup_steps,
+                    schedule=self.gw_cfg.schedule,
+                    total_steps=self.num_iterations,
+                )
+                # normalized audio latent (same normalization used inside the network)
+                a_mean_norm = self.network.module.normalize(a_mean.clone())
+                gw_loss, _ = compute_gw_regularization(
+                    self.network.module,
+                    variant=self.gw_cfg.variant,
+                    clip_f_raw=gw_clip_f,
+                    x1=a_mean_norm,
+                    video_exist=video_exist,
+                    detach_video=self.gw_cfg.detach_video,
+                    num_sinkhorn_iter=self.gw_cfg.num_sinkhorn_iter,
+                    epsilon=self.gw_cfg.epsilon,
+                    alpha=self.gw_cfg.alpha,
+                )
+                self.train_integrator.add_dict({
+                    'gw_loss': gw_loss.detach(),
+                    'gw_lambda': torch.tensor(eff_lambda, device=gw_loss.device),
+                })
+                total_loss = mean_loss + eff_lambda * gw_loss
+            mean_loss = total_loss
 
         if it % self.log_text_interval == 0 and it != 0:
             self.train_integrator.add_scalar('lr', self.scheduler.get_last_lr()[0])
