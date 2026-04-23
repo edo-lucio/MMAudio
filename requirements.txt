@@ -1,0 +1,59 @@
+# MMAudio + GW regularization — pinned to the last torch stack that still
+# ships torio (torchaudio.io.StreamingMediaDecoder), which the extractors
+# and eval video dataset depend on.
+#
+# Install CUDA wheels first, then the rest:
+#   pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
+#       --index-url https://download.pytorch.org/whl/cu118
+#   pip install -r requirements.txt
+#
+# Swap cu118 for cu121/cu124 if your system CUDA is newer.
+
+# ---- Core torch stack (also resolvable from default PyPI for CPU-only dev)
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
+torchcodec
+
+# ---- Model / training
+hydra-core>=1.3.2
+hydra_colorlog
+omegaconf
+tensordict>=0.6.1
+torchdiffeq>=0.2.5
+nitrous-ema
+open_clip_torch>=2.29.0
+timm>=1.0.12
+einops>=0.6
+huggingface_hub>=0.26
+
+# ---- Data / IO
+av>=14.0.1
+librosa>=0.8.1
+soundfile
+opencv-python>=4.8
+Pillow>=9.5
+datasets
+
+# ---- Numerics / utils
+numpy>=1.21,<2.1
+scipy>=1.7
+pandas
+matplotlib
+scikit-learn
+cython
+requests
+python-dotenv
+tqdm>=4.66.1
+colorlog
+gitpython>=3.1
+
+# ---- Logging / UI
+tensorboard>=2.11
+gradio>=3.34,<6.0
+
+# ---- Download helper (down.py)
+yt-dlp
+
+# ---- Evaluation (install separately from git; not on PyPI)
+# pip install git+https://github.com/hkchengrex/av-benchmark

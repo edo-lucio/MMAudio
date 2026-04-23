@@ -174,7 +174,7 @@ Training **does not** run CLIP / Synchformer / VAE at step time — everything i
 Edit the constants at the top of `training/extract_video_training_latents.py` to match your paths (input video dir, `latent_dir`, `output_dir`, split). Target 16kHz for the GW sweep. Then:
 
 ```bash
-torchrun --standalone --nproc_per_node=<N> training/extract_video_training_latents.py
+torchrun --standalone --nproc_per_node=1 training/extract_video_training_latents.py
 ```
 
 Produces, in `output_dir`:
