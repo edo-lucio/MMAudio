@@ -57,21 +57,21 @@ data_cfg = {
         'subset_name': './training/example_video.tsv',
         'normalize_audio': True,
     },
-    # 'train': {
-    #     'root': '../data/video',
-    #     'subset_name': './sets/vgg3-train.tsv',
-    #     'normalize_audio': True,
-    # },
-    # 'test': {
-    #     'root': '../data/video',
-    #     'subset_name': './sets/vgg3-test.tsv',
-    #     'normalize_audio': False,
-    # },
-    # 'val': {
-    #     'root': '../data/video',
-    #     'subset_name': './sets/vgg3-val.tsv',
-    #     'normalize_audio': False,
-    # },
+    'train': {
+        'root': '../data/video',
+        'subset_name': './sets/vgg3-train.tsv',
+        'normalize_audio': True,
+    },
+    'test': {
+        'root': '../data/video',
+        'subset_name': './sets/vgg3-test.tsv',
+        'normalize_audio': False,
+    },
+    'val': {
+        'root': '../data/video',
+        'subset_name': './sets/vgg3-val.tsv',
+        'normalize_audio': False,
+    },
 }
 
 
