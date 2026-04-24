@@ -1,0 +1,47 @@
+#!/bin/bash
+#SBATCH --job-name=mma_gwxsync
+#SBATCH --output=logs/gwxsync_%A_%a.out
+#SBATCH --error=logs/gwxsync_%A_%a.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=128G
+#SBATCH --time=48:00:00
+#SBATCH --partition=acltr
+#SBATCH --gres=gpu:1
+#SBATCH --array=0-3
+
+# Experiment 8: 2x2 GW x sync-features interaction.
+# Array:
+#   0 -> gw=false sync=true     (pure baseline)
+#   1 -> gw=false sync=false
+#   2 -> gw=true  sync=true
+#   3 -> gw=true  sync=false
+
+PROJECT_DIR="$HOME/MMA/MMAudio"
+ENV_PATH="/home/edlu/miniconda3-25-5-1-1/envs/gwot"
+source "$PROJECT_DIR/jobs/_header.sh"
+
+declare -A GW=( [0]=false [1]=false [2]=true  [3]=true  )
+declare -A SY=( [0]=true  [1]=false [2]=true  [3]=false )
+
+G="${GW[$SLURM_ARRAY_TASK_ID]}"
+S="${SY[$SLURM_ARRAY_TASK_ID]}"
+DISABLE_SYNC=$( [ "$S" = "false" ] && echo true || echo false )
+
+VAR="${BEST_VARIANT:-global}"
+MODEL="${MODEL:-small_16k}"
+ITERS="${ITERS:-300000}"
+LAMBDA="${LAMBDA:-0.01}"
+GPUS=1
+
+mkdir -p logs output
+
+torchrun --standalone --nproc_per_node="$GPUS" train.py \
+    exp_id="gw_${G}_sync_${S}" \
+    model="$MODEL" \
+    num_iterations="$ITERS" \
+    gw_regularization.enabled="$G" \
+    gw_regularization.variant="$VAR" \
+    gw_regularization.lambda_gw="$LAMBDA" \
+    disable_sync="$DISABLE_SYNC"

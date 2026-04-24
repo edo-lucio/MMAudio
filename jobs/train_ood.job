@@ -1,0 +1,58 @@
+#!/bin/bash
+#SBATCH --job-name=mma_gw_ood
+#SBATCH --output=logs/gw_ood_%A_%a.out
+#SBATCH --error=logs/gw_ood_%A_%a.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=128G
+#SBATCH --time=48:00:00
+#SBATCH --partition=acltr
+#SBATCH --gres=gpu:1
+#SBATCH --array=0-1
+
+# Experiment 6: OOD generalization with a held-out training split.
+# Requires: experiments/make_ood_split.py has already been run to produce
+#   sets/vgg3-train-ood.tsv and ../data/v1-16-memmap/vgg-train-ood.tsv.
+#
+# Array:
+#   0 -> baseline (GW off) on ood split
+#   1 -> GW on ood split
+
+PROJECT_DIR="$HOME/MMA/MMAudio"
+ENV_PATH="/home/edlu/miniconda3-25-5-1-1/envs/gwot"
+source "$PROJECT_DIR/jobs/_header.sh"
+
+VAR="${BEST_VARIANT:-global}"
+MODEL="${MODEL:-small_16k}"
+ITERS="${ITERS:-300000}"
+LAMBDA="${LAMBDA:-0.01}"
+GPUS=1
+
+COMMON=(
+    data.VGGSound.subset_name=sets/vgg3-train-ood.tsv
+    data.ExtractedVGG.tsv=../data/v1-16-memmap/vgg-train-ood.tsv
+)
+
+mkdir -p logs output
+
+case "$SLURM_ARRAY_TASK_ID" in
+    0)
+        torchrun --standalone --nproc_per_node="$GPUS" train.py \
+            exp_id="gw_ood_baseline" \
+            model="$MODEL" \
+            num_iterations="$ITERS" \
+            gw_regularization.enabled=false \
+            "${COMMON[@]}"
+        ;;
+    1)
+        torchrun --standalone --nproc_per_node="$GPUS" train.py \
+            exp_id="gw_ood_${VAR}" \
+            model="$MODEL" \
+            num_iterations="$ITERS" \
+            gw_regularization.enabled=true \
+            gw_regularization.variant="$VAR" \
+            gw_regularization.lambda_gw="$LAMBDA" \
+            "${COMMON[@]}"
+        ;;
+esac

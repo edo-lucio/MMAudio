@@ -9,10 +9,15 @@ at OUTPUT_DIR, which lines up with VGGSound.root in config/data/base.yaml.
 All settings are module-level constants below. The run stops once
 accumulated on-disk size in OUTPUT_DIR reaches MAX_BYTES.
 
-Clips are downloaded in proportionally interleaved order across splits, so
-that the val/test/train ratio stays consistent no matter when the size cap
-fires. E.g. with quotas val=50, test=100, train=850, every 100 clips you
-download will be ~5 val, ~10 test, ~85 train.
+Resume-aware: clips already on disk are counted per split before building the
+download plan, so the remaining quota for each split is adjusted accordingly.
+The proportional interleaving is computed on *remaining* quotas, not total
+quotas, meaning the val/test/train ratio of newly-downloaded clips will
+compensate for any imbalance already present on disk.
+
+E.g. quotas val=50, test=100, train=850. If you already have val=48, test=30,
+train=200 on disk, the remaining quotas are val=2, test=70, train=650 and the
+new downloads are interleaved at that corrected ratio.
 
 Requires: yt-dlp, ffmpeg on PATH.
 """
@@ -32,9 +37,10 @@ VGGSOUND_CSV_URL = "https://www.robots.ox.ac.uk/~vgg/data/vggsound/vggsound.csv"
 SETS_DIR = "sets"                    # local split manifests (vgg-*.tsv)
 OUTPUT_DIR = "./data/video"          # matches config/data/base.yaml VGGSound.root
 MAX_BYTES = 5 * 1024 ** 3            # ~5 GB cap; change here for more/less
-# Per-split quotas. The *ratio* of these values determines the proportion of
-# each split in the download — order here no longer matters for fairness
-# because interleaving is done proportionally (see parse_plan).
+# Per-split quotas. The *ratio* of these values determines the target proportion.
+# On resume the downloader computes per-split deficits (quota − already on disk)
+# and interleaves only the missing clips, so the final collection always trends
+# toward this ratio regardless of how many times you restart.
 SPLIT_QUOTAS = {"val": 50, "test": 100, "train": 850}
 NUM_WORKERS = 2                      # keep low to avoid triggering bot detection
 CLIP_LENGTH_SEC = 10                 # VGGSound clips are all 10 s
@@ -85,18 +91,34 @@ def fetch_csv() -> str:
         return r.read().decode("utf-8")
 
 
+def already_have(vid_id: str) -> bool:
+    return os.path.exists(os.path.join(OUTPUT_DIR, f"{vid_id}.mp4"))
+
+
+def count_existing_per_split(per_split: dict[str, set[str]]) -> dict[str, int]:
+    """Count clips already on disk for each split."""
+    return {
+        split: sum(1 for vid_id in ids if already_have(vid_id))
+        for split, ids in per_split.items()
+    }
+
+
 def parse_plan(
-    csv_text: str, per_split: dict[str, set[str]]
+    csv_text: str,
+    per_split: dict[str, set[str]],
+    existing_counts: dict[str, int],
 ) -> list[tuple[str, str, int]]:
     """Return [(vid_id, youtube_id, start_sec), ...] interleaved proportionally
-    across splits so every split's quota is sampled at the same fractional rate.
+    across splits using *remaining* per-split quotas (quota − already on disk).
 
-    For each clip we compute a sort key = (position_in_split / split_quota),
-    which places the i-th percentile clip from every split at the same position
-    in the global list. The size cap can therefore fire at any point and still
-    yield a val/test/train ratio that matches SPLIT_QUOTAS.
+    Sort key = i / remaining_quota, which places the i-th clip of each split
+    at the correct fractional position in the global list. Because we use the
+    remaining quota as the denominator, splits that still need many clips are
+    spread evenly through the list while splits that are nearly full appear
+    briefly at the front and then stop contributing — exactly what you want
+    when resuming a partially-completed download.
     """
-    # bucket CSV rows by split
+    # Bucket CSV rows by split, skipping already-downloaded clips.
     buckets: dict[str, list[tuple[str, str, int]]] = {s: [] for s in SPLIT_QUOTAS}
     reader = csv.reader(io.StringIO(csv_text))
     for row in reader:
@@ -110,34 +132,30 @@ def parse_plan(
         vid_id = f"{ytid}_{start_s:06d}"
         for split, ids in per_split.items():
             if vid_id in ids:
-                buckets[split].append((vid_id, ytid, start_s))
+                if not already_have(vid_id):   # skip clips already on disk
+                    buckets[split].append((vid_id, ytid, start_s))
                 break
 
-    # Build a proportionally interleaved plan.
-    #
-    # Sort key = fractional position within each split's quota:
-    #   clip at index i of a split with quota Q  →  key = i / Q
-    #
-    # This means the first clip of every split sorts to ~0.0, the halfway
-    # clip of every split sorts to ~0.5, etc. A global sort by this key
-    # interleaves splits at the correct ratio throughout the list.
     tagged: list[tuple[float, str, tuple[str, str, int]]] = []
     for split, quota in SPLIT_QUOTAS.items():
-        chosen = buckets[split][:quota]
-        n = len(chosen)
-        print(f"  {split}: {n}/{len(buckets[split])} available (quota {quota})")
+        have = existing_counts.get(split, 0)
+        remaining = max(0, quota - have)
+        candidates = buckets[split]          # already filtered above
+        chosen = candidates[:remaining]
+        print(
+            f"  {split}: {have} on disk + {len(chosen)} to fetch  "
+            f"(quota {quota}, {len(candidates)} available in CSV)"
+        )
+        if remaining == 0:
+            continue
         for i, item in enumerate(chosen):
-            key = i / quota          # fractional position — not i/n — so that
-                                     # a short split doesn't crowd the front
+            # Denominator is remaining_quota so that a split with few clips
+            # left doesn't artificially crowd the early part of the list.
+            key = i / remaining
             tagged.append((key, split, item))
 
     tagged.sort(key=lambda x: x[0])
-    plan = [item for _, _split, item in tagged]
-    return plan
-
-
-def already_have(vid_id: str) -> bool:
-    return os.path.exists(os.path.join(OUTPUT_DIR, f"{vid_id}.mp4"))
+    return [item for _, _split, item in tagged]
 
 
 def download_one(task: tuple[str, str, int]) -> tuple[str, int, str | None]:
@@ -149,7 +167,6 @@ def download_one(task: tuple[str, str, int]) -> tuple[str, int, str | None]:
     url = f"https://www.youtube.com/watch?v={ytid}"
     src_tmpl = os.path.join(OUTPUT_DIR, f".{vid_id}.src.%(ext)s")
 
-    # build the base yt-dlp command, injecting cookies if configured
     yt_base = ["yt-dlp", "-q", "--no-playlist", "--no-warnings",
                "-f", "mp4/bestvideo*+bestaudio/best",
                "--merge-output-format", "mp4"]
@@ -158,12 +175,10 @@ def download_one(task: tuple[str, str, int]) -> tuple[str, int, str | None]:
 
     try:
         for attempt in range(YT_RETRIES + 1):
-            # jitter before every attempt to spread load across workers
             time.sleep(random.uniform(JITTER_MIN, JITTER_MAX))
             rc = subprocess.call(yt_base + ["-o", src_tmpl, url])
             if rc == 0:
                 break
-            # exponential back-off on retries
             if attempt < YT_RETRIES:
                 time.sleep(2 ** attempt * 5)
         else:
@@ -189,9 +204,8 @@ def download_one(task: tuple[str, str, int]) -> tuple[str, int, str | None]:
         ])
         os.remove(src)
     except Exception as e:
-        for p in (out_mp4,):
-            if os.path.exists(p):
-                os.remove(p)
+        if os.path.exists(out_mp4):
+            os.remove(out_mp4)
         for f in os.listdir(OUTPUT_DIR):
             if f.startswith(f".{vid_id}.src."):
                 try:
@@ -221,23 +235,31 @@ if __name__ == "__main__":
     if COOKIES_FILE and not os.path.exists(COOKIES_FILE):
         print(
             f"warning: COOKIES_FILE={COOKIES_FILE!r} not found. "
-            "  yt-dlp --cookies-from-browser chrome --cookies cookies.txt "
+            "Run:  yt-dlp --cookies-from-browser chrome --cookies cookies.txt "
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
         )
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     per_split = load_split_ids()
-    total_allowed = sum(len(s) for s in per_split.values())
-    print(f"{total_allowed} ids across splits: "
-          f"{ {k: len(v) for k, v in per_split.items()} }")
+    print(f"manifest ids: { {k: len(v) for k, v in per_split.items()} }")
+
+    # Count what's already on disk before touching the CSV, so parse_plan can
+    # compute per-split deficits and build a correctly balanced remaining plan.
+    existing_counts = count_existing_per_split(per_split)
+    print(f"already on disk: {existing_counts}  "
+          f"(total {sum(existing_counts.values())})")
 
     print(f"fetching {VGGSOUND_CSV_URL}")
-    plan = parse_plan(fetch_csv(), per_split)
-    plan = [t for t in plan if not already_have(t[0])]
-    print(f"{len(plan)} clips to download "
-          f"(target ratio  val:{SPLIT_QUOTAS['val']}  "
-          f"test:{SPLIT_QUOTAS['test']}  train:{SPLIT_QUOTAS['train']})")
+    plan = parse_plan(fetch_csv(), per_split, existing_counts)
+
+    remaining_needed = {s: max(0, SPLIT_QUOTAS[s] - existing_counts[s]) for s in SPLIT_QUOTAS}
+    print(
+        f"{len(plan)} clips to download  "
+        f"(remaining quotas: "
+        + "  ".join(f"{s}={remaining_needed[s]}" for s in SPLIT_QUOTAS)
+        + ")"
+    )
 
     start_size = current_size()
     print(f"current size: {start_size / 1e9:.2f} GB  cap: {MAX_BYTES / 1e9:.2f} GB")
@@ -245,11 +267,13 @@ if __name__ == "__main__":
         print("cap already reached; nothing to do")
         sys.exit(0)
     if not plan:
+        print("all quotas already satisfied; nothing to do")
         sys.exit(0)
 
     downloaded = 0
     running = start_size
-    counts: dict[str, int] = {s: 0 for s in SPLIT_QUOTAS}
+    # Session counts (clips fetched this run, not counting what was already on disk)
+    session_counts: dict[str, int] = {s: 0 for s in SPLIT_QUOTAS}
 
     with Pool(NUM_WORKERS) as pool:
         it = pool.imap_unordered(download_one, plan, chunksize=1)
@@ -257,23 +281,27 @@ if __name__ == "__main__":
             if err:
                 print(f"[skip] {vid_id}: {err}")
                 continue
-            # infer split from vid_id for progress tracking
             for split, ids in per_split.items():
                 if vid_id in ids:
-                    counts[split] += 1
+                    session_counts[split] += 1
                     break
             running += size
             downloaded += 1
             if downloaded % 10 == 0:
+                # Show combined totals (existing + this session) for each split
+                combined = {s: existing_counts[s] + session_counts[s] for s in SPLIT_QUOTAS}
                 split_summary = "  ".join(
-                    f"{s}={counts[s]}" for s in SPLIT_QUOTAS
+                    f"{s}={combined[s]}/{SPLIT_QUOTAS[s]}" for s in SPLIT_QUOTAS
                 )
-                print(f"  {downloaded} clips [{split_summary}]  "
-                      f"+{(running - start_size) / 1e9:.2f} GB")
+                print(
+                    f"  {downloaded} new clips [{split_summary}]  "
+                    f"+{(running - start_size) / 1e9:.2f} GB this run"
+                )
             if running >= MAX_BYTES:
                 print(f"reached cap at {running / 1e9:.2f} GB; stopping")
                 pool.terminate()
                 break
 
-    split_summary = "  ".join(f"{s}={counts[s]}" for s in SPLIT_QUOTAS)
+    combined = {s: existing_counts[s] + session_counts[s] for s in SPLIT_QUOTAS}
+    split_summary = "  ".join(f"{s}={combined[s]}/{SPLIT_QUOTAS[s]}" for s in SPLIT_QUOTAS)
     print(f"done. [{split_summary}]  final size: {current_size() / 1e9:.2f} GB")

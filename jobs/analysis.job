@@ -1,0 +1,28 @@
+#!/bin/bash
+#SBATCH --job-name=mma_analysis
+#SBATCH --output=logs/analysis_%j.out
+#SBATCH --error=logs/analysis_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
+#SBATCH --time=01:00:00
+#SBATCH --partition=acltr
+
+# Offline plots + coupling matrices. No GPU required for curves;
+# analyze_couplings needs a GPU — split into a second job if needed.
+
+PROJECT_DIR="$HOME/MMA/MMAudio"
+ENV_PATH="/home/edlu/miniconda3-25-5-1-1/envs/gwot"
+source "$PROJECT_DIR/jobs/_header.sh"
+
+mkdir -p logs output/_analysis
+
+# 1) Loss / metric curves across all gw_* runs
+python experiments/analysis.py curves --runs output/gw_*
+
+# 2) Coupling-matrix visualization for the best GW run (set via BEST_RUN env)
+if [ -n "${BEST_RUN:-}" ] && [ -f "output/${BEST_RUN}/${BEST_RUN}_ema_final.pth" ]; then
+    python experiments/analyze_couplings.py \
+        --weights "output/${BEST_RUN}/${BEST_RUN}_ema_final.pth"
+fi

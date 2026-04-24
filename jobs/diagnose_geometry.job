@@ -1,0 +1,33 @@
+#!/bin/bash
+#SBATCH --job-name=mma_diag
+#SBATCH --output=logs/diag_%j.out
+#SBATCH --error=logs/diag_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
+#SBATCH --time=01:00:00
+#SBATCH --partition=acltr
+#SBATCH --gres=gpu:1
+
+# Motivating-figure job: runs the released MMAudio checkpoint (no training)
+# on VGGSound test latents and produces scatter / kNN-curve / coupling-heatmap
+# + metrics.csv showing that MMAudio's embedding space is relationally
+# misaligned across video and audio.
+#
+# Output: analysis/motivation/{scatter_*.png, knn.png, coupling.png,
+#   metrics.csv, metrics.tex}
+
+PROJECT_DIR="$HOME/MMA/MMAudio"
+ENV_PATH="/home/edlu/miniconda3-25-5-1-1/envs/gwot"
+source "$PROJECT_DIR/jobs/_header.sh"
+
+WEIGHTS="${WEIGHTS:-weights/mmaudio_small_16k.pth}"
+MAX_SAMPLES="${MAX_SAMPLES:-2000}"
+
+mkdir -p logs analysis/motivation
+
+python experiments/diagnose_geometry.py \
+    --weights "$WEIGHTS" \
+    --out_dir analysis/motivation \
+    --max_samples "$MAX_SAMPLES"

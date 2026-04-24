@@ -1,0 +1,68 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage[round,authoryear]{natbib}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{siunitx}
+
+% Math macros (per project convention -- do not redefine)
+\newcommand{\LFM}{\mathcal{L}_{\mathrm{FM}}}
+\newcommand{\LGW}{\mathcal{L}_{\mathrm{GW}}}
+\newcommand{\LFGW}{\mathcal{L}_{\mathrm{FGW}}}
+\newcommand{\DV}{D_{V}}
+\newcommand{\DA}{D_{A}}
+\newcommand{\Tstar}{T^{\star}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+
+\graphicspath{{figures/}}
+
+\title{Relational Cross-Modal Alignment via Gromov--Wasserstein\\
+  Regularization for Video-to-Audio Flow Matching}
+\author{Edoardo Luciani}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+Video-to-audio (V2A) flow-matching models such as MMAudio align
+instance-level features through contrastive pairing, cross-attention,
+and adaptive-LayerNorm conditioning. These are \emph{pointwise}
+mechanisms: each video feature is matched to one audio feature.
+The pairwise geometry of the two modalities --- which clips sound
+alike, which look alike --- is not explicitly constrained. We add
+an entropic Gromov--Wasserstein (GW) penalty between the
+intra-video and intra-audio squared-distance matrices of every
+mini-batch, solved via Peyr\'e-style mirror descent with an inner
+Sinkhorn projection in float32. The regularizer drops into the
+MMAudio training loop as one extra loss term with five knobs: the
+representation pair it compares (four variants), its weight
+$\lambda_{\mathrm{GW}}$, whether the video side is
+gradient-detached, a warm-up schedule, and an interaction with
+Synchformer features. We evaluate each axis on VGGSound against
+FD$_{\text{PaSST}}$, Inception Score, ImageBind score, and DeSync,
+plus a held-out-class OOD split and coupling-matrix diagnostics.
+\end{abstract}
+
+\tableofcontents
+
+\input{chapters/intro}
+\input{chapters/background}
+\input{chapters/method}
+\input{chapters/design}
+\input{chapters/experiments}
+\input{chapters/results}
+\input{chapters/conclusion}
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}

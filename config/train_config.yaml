@@ -26,8 +26,8 @@ save_weights_interval: 10_000
 save_checkpoint_interval: 10_000
 save_copy_iterations: []
 
-batch_size: 512
-eval_batch_size: 256 # per-GPU
+batch_size: 128
+eval_batch_size: 128 # per-GPU
 
 num_iterations: 300_000
 learning_rate: 1.0e-4

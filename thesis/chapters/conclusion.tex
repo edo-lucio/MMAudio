@@ -1,0 +1,118 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+\subsection{Summary of contributions}
+The MMAudio paper \citep{cheng2024mmaudio} frames V2A as
+conditional flow matching with three modalities funnelled through
+a single MMDiT stack, and reports state-of-the-art results using
+only the flow-matching loss --- no auxiliary contrastive,
+alignment, or distribution-matching term. Every cross-modal
+coupling it uses (joint attention, Conditional Synchronization
+Module, empty-token masking) is pointwise. This thesis adds one
+relational-geometry term to that objective and asks, across five
+design axes, whether it closes the pointwise-to-relational gap
+identified in Sec.\,\ref{sec:intro:pointwise}. The delta we
+introduce is exactly one additive loss term; no architectural
+change, no pretraining, no new data. Concretely:
+\begin{itemize}[leftmargin=*,topsep=2pt]
+  \item A batch-level entropic Gromov--Wasserstein regularizer
+    $\LGW$ (plus an FGW variant) between intra-video and
+    intra-audio pairwise squared-distance matrices, solved by
+    Peyr\'e-style mirror descent with an inner Sinkhorn
+    projection in float32
+    (\texttt{mmaudio/model/gw\_regularization.py}).
+  \item Five design axes D1--D5 covering which representations to
+    compare, penalty strength, detach direction, schedule, and
+    interaction with Synchformer; each owned by one Slurm job
+    script under \texttt{jobs/}.
+  \item Evaluation beyond aggregate metrics: per-class IB-score
+    deltas, representation-geometry diagnostics (effective rank,
+    singular spectrum), and coupling-matrix $\Tstar$ heatmaps
+    over VGGSound classes.
+\end{itemize}
+
+\subsection{Positioning relative to MMAudio's own limitations}
+\citet{cheng2024mmaudio} note two scope limitations of MMAudio
+in their Section 4.4: (i) the model fails on human speech
+because it is specialized to Foley; (ii) scaling past 157\,M
+parameters gives diminishing returns, which the authors
+attribute to the scarcity of audio-visual data. Our contribution
+is orthogonal to both. Relational geometry is a loss-level
+property, not a capacity or data-scale property; if H1 holds, a
+\emph{fixed-capacity, fixed-data} MMAudio can be improved by
+better using the data it already sees. A natural reading of our
+hypothesis is: some of the diminishing-return plateau MMAudio
+describes is a plateau of pointwise-only supervision, not of
+model capacity.
+
+\subsection{Scope and limitations}
+\begin{description}[leftmargin=2em]
+  \item[Batch-level, not stream-level.] We regularize over the
+    mini-batch axis, so $\DV$ and $\DA$ have shape $B \times B$.
+    A different reading of ``relational'' would be to regularize
+    within a single clip across time (pairwise over the $N=250$
+    latent steps). The current design leaves that untouched. A
+    time-axis variant would interact closely with Synchformer and
+    is a natural extension.
+  \item[Per-rank GW under DDP.] As noted in
+    Sec.\,\ref{sec:method:subset}, the GW loss is computed on the
+    local real-video subset of each rank, not on the global batch.
+    This is a consistency approximation; an all-gather before GW
+    would give the global-batch objective at the cost of one
+    extra NCCL round per step.
+  \item[Small\_16k only.] All experiments run at the
+    \texttt{small\_16k} configuration; MMAudio also ships
+    \texttt{small\_44k}, \texttt{medium\_44k}, and
+    \texttt{large\_44k} variants. The training cost ($\sim\!48$
+    hours per 300k steps on one GPU) plus the 1 $+$ 20 run grid
+    already saturates the cluster budget; scaling to
+    \texttt{large\_44k} is future work.
+  \item[No training-from-scratch comparisons.] All runs share
+    MMAudio's random init but no pretrained base weights are
+    loaded. We do not compare against a two-stage fine-tuning
+    recipe (pretrain without GW, then fine-tune with GW).
+  \item[Sinkhorn numerics are brittle in bfloat16.] This is
+    documented in the repository's CLAUDE.md; we work around it
+    by forcing float32 inside the GW block. A Sinkhorn-with-log
+    formulation would let us reclaim bfloat16 but was not
+    necessary for the small batch sizes studied here.
+  \item[Metric limitations.] FD$_{\text{PaSST}}$ / IS are
+    audio-only distributional; IB-score is one external retrieval
+    model; DeSync relies on Synchformer. All four are proxies for
+    listener judgment. We do not report human evaluations.
+\end{description}
+
+\subsection{Expected contributions}
+The contribution we claim is narrow and testable:
+\begin{itemize}[leftmargin=*,topsep=2pt]
+  \item If H1 holds, entropic GW is a near-free addition to an
+    MMAudio-style V2A training objective --- one loss term, one
+    scalar, no architecture changes.
+  \item If H2 holds, the \emph{level} of representation GW is
+    applied to is a first-order design choice, comparable in
+    effect to the choice of CLIP vs audio-side projection for a
+    contrastive auxiliary.
+  \item If H3 holds, the regularizer has a clean operating
+    regime (non-monotone in $\lambda_{\mathrm{GW}}$), making it
+    tunable rather than brittle.
+  \item The coupling-matrix diagnostic in
+    \texttt{analyze\_couplings.py} gives a cheap, visual answer
+    to ``is relational structure actually captured?'' ---
+    independent of whether FD$_{\text{PaSST}}$ went down.
+\end{itemize}
+
+\subsection{Future work}
+Four extensions follow directly from the limitations:
+\begin{enumerate}[leftmargin=*]
+  \item Time-axis GW across the $N$ latent steps within a clip,
+    possibly replacing or augmenting Synchformer.
+  \item Global-batch GW via an all-gather, to quantify the
+    per-rank approximation.
+  \item GW as a fine-tuning objective on top of a pretrained
+    MMAudio checkpoint, to isolate the relational contribution
+    from the full 300k-step joint training.
+  \item Partial / unbalanced GW \citep{chapel2020partial}:
+    relaxing the uniform-marginal assumption would let GW cope
+    gracefully with batches that mix genuinely different class
+    distributions (e.g. when the oversample ratio changes).
+\end{enumerate}

@@ -1,0 +1,208 @@
+\section{Method}
+\label{sec:method}
+
+\subsection{Starting point: the MMAudio objective}
+\label{sec:method:baseline}
+Let $x_1 \in \R^{N \times d}$ be a VAE-encoded audio latent (for
+the 16\,kHz small model, $N=250$, $d=20$). Conditioning consists of
+CLIP tokens $z^{\text{clip}} \in \R^{64 \times 1024}$,
+Synchformer tokens $z^{\text{sync}} \in \R^{192 \times 768}$, and
+CLIP-text tokens $z^{\text{text}} \in \R^{77 \times 1024}$. With a
+sampled time $t \sim \operatorname{LogNormal}$ and Gaussian
+$x_0$, MMAudio minimizes the flow-matching loss of
+Sec.\,\ref{sec:background},
+\begin{equation}
+  \LFM(\theta) = \E\,
+    \bigl\lVert v_\theta(t, x_t; z^{\text{clip}}, z^{\text{sync}},
+      z^{\text{text}}) - (x_1 - x_0) \bigr\rVert_2^2,
+\end{equation}
+with classifier-free dropout (probability 0.1) of each conditioning
+stream. Gradients therefore flow through the MMDiT joint blocks
+(joint QKV attention) and the Conditional Synchronization
+Module (frame-aligned adaLN). Both mechanisms align video and
+audio features \emph{pointwise}, as analyzed in
+Sec.\,\ref{sec:background:mmaudio}. No other loss term is added
+in \citet{cheng2024mmaudio}; the pointwise--relational gap we
+target (Sec.\,\ref{sec:intro:pointwise}) lives precisely in the
+space of objectives this expectation does not cover.
+
+\subsection{The regularized objective}
+\label{sec:method:reg}
+We add a single relational term:
+\begin{equation}
+\label{eq:total-loss}
+  \mathcal{L}(\theta) = \underbrace{\LFM(\theta)}_{\text{pointwise, MMAudio}}
+    + \lambda_{\mathrm{GW}}(t_{\text{step}}) \cdot
+    \underbrace{\LGW(\theta)}_{\text{relational, ours}},
+\end{equation}
+where $t_{\text{step}}$ is the global training iteration and
+$\lambda_{\mathrm{GW}}(\cdot)$ is a schedule (Sec.\,\ref{sec:design}).
+The two terms operate on orthogonal axes: $\LFM$ is a sum of
+per-sample, per-time-step regression errors; $\LGW$ is a function
+only of the batch-level $B \times B$ distance matrices and is
+constant under any transformation that preserves pairwise
+distances (translation, orthogonal rotation). A training step can
+lower one without trivially lowering the other, which is what
+makes the ablations in Sec.\,\ref{sec:experiments} informative.
+The GW loss is computed \emph{per batch} from the two pairwise
+distance matrices $\DV, \DA \in \R^{B \times B}$:
+\begin{align}
+  \DV[i,k] &= \lVert v_i - v_k \rVert_2^2, \\
+  \DA[j,\ell] &= \lVert a_j - a_\ell \rVert_2^2,
+\end{align}
+where $v_i, a_j \in \R^{D}$ are the per-sample
+\emph{representations} pulled from the network; the exact choice
+of representation is design axis D1 (Sec.\,\ref{sec:design}).
+
+\paragraph{Scale invariance.}
+Because both $\DV$ and $\DA$ scale with the feature magnitude, and
+because the ratio $\lVert \DV \rVert / \lVert \DA \rVert$ is
+arbitrary, we normalize each by its mean before computing GW:
+\begin{equation}
+  \tilde D = D / \operatorname{mean}(D).
+\end{equation}
+This removes one confounder from the $\lambda_{\mathrm{GW}}$
+sweep --- otherwise $\lambda_{\mathrm{GW}}$ would have to chase
+feature-magnitude drift during training.
+
+\subsection{Entropic GW via Peyr\'e mirror descent}
+\label{sec:method:gw}
+The relational loss is the entropic GW distance of
+Eq.\,(\ref{eq:gw}) with uniform marginals $p = q = \mathbf{1}/B$:
+\begin{equation}
+  \LGW =
+    \sum_{i,j,k,\ell}
+    \bigl( \tilde\DV[i,k] - \tilde\DA[j,\ell] \bigr)^{2}
+    T_{ij}\, T_{k\ell}
+    - \varepsilon\, H(T),
+\end{equation}
+optimized over $T \in \Pi(p, q)$. We solve this with the
+projected-gradient algorithm of \citet{peyre2016gromov}: at each
+outer step, linearize the quadratic cost around the current $T$
+using $G = -2\, \tilde\DV\, T\, \tilde\DA$, set
+$K = \exp(-G / \varepsilon)$, and run $L$ Sinkhorn iterations
+\citep{cuturi2013sinkhorn}:
+\begin{equation}
+  u \leftarrow p \oslash (K v),
+  \qquad
+  v \leftarrow q \oslash (K^{\top} u),
+  \qquad
+  T \leftarrow \operatorname{diag}(u)\, K\, \operatorname{diag}(v),
+\end{equation}
+with $\oslash$ element-wise division and a small floor
+($10^{-8}$) to guard against division by zero. We use $K_{\text{out}}
+= 5$ outer iterations and $L = 20$ inner Sinkhorn iterations by
+default; these were fixed early and not retuned, since batches of
+$B \le 512$ converge well before that.
+
+Given the final coupling $\Tstar$, we return the full objective
+$\sum_{ijk\ell}(\DV[i,k] - \DA[j,\ell])^2\, \Tstar_{ij}\,
+\Tstar_{k\ell}$ evaluated as
+$\lVert \tilde\DV \rVert^2_p + \lVert \tilde\DA \rVert^2_q
+- 2 \langle \tilde\DV\, \Tstar\, \tilde\DA, \Tstar \rangle$, so
+that the logged loss magnitude is comparable across variants.
+
+\paragraph{Float32 is not optional.}
+The inner Sinkhorn's ratios $p \oslash (K v)$ and the matrix
+exponential $\exp(-G/\varepsilon)$ are both numerically fragile.
+bfloat16 loses the dynamic range of $K$ as soon as $G$ gets large
+(early training or small $\varepsilon$) and the Sinkhorn diverges.
+We wrap the entire GW computation in
+\texttt{torch.cuda.amp.autocast(enabled=False)} and cast inputs
+to \texttt{float32} on entry. The rest of the network continues
+to train in bfloat16. Empirically this is a measured cost: the
+per-step overhead of GW is dominated by two $B \times B$
+matrix--matrix multiplies per outer step, i.e. at $B{=}64$ it is
+negligible relative to the transformer forward.
+
+\subsection{Fused Gromov--Wasserstein variant}
+\label{sec:method:fgw}
+For the \texttt{fused} variant (D1), we additionally build a
+pointwise cross-domain cost from $\ell_2$-normalized
+representations,
+$C_{\text{cross}}[i,j] = 1 - \hat v_i^{\top} \hat a_j$, and solve
+the FGW problem \citep{vayer2020fused}:
+\begin{equation}
+  \LFGW(T) =
+    \alpha \sum_{ijk\ell}
+    (\tilde \DV[i,k] - \tilde \DA[j,\ell])^2 T_{ij} T_{k\ell}
+    + (1-\alpha) \langle C_{\text{cross}}, T \rangle,
+\end{equation}
+with the same Peyr\'e--Sinkhorn machinery (the outer linearized
+cost becomes $\alpha G_{\mathrm{GW}} + (1-\alpha) C_{\text{cross}}$).
+We use $\alpha = 0.5$ by default.
+
+\subsection{Real-video subset and DDP}
+\label{sec:method:subset}
+MMAudio's joint training interleaves audio--visual and
+audio--text samples at approximately $1{:}1$
+\citep{cheng2024mmaudio}; the MMAudio release we build on
+preserves the same mix via a \texttt{MultiModalDataset} of
+VGGSound (video + audio) plus audio-only corpora (AudioCaps,
+AudioSetSL, BBCSound, FreeSound, Clotho). For audio-only
+samples, the CLIP and Synchformer features are empty
+placeholders, and the flow-matching stream feeds them as
+$\varnothing_v, \varnothing_{\mathrm{syn}}$ tokens --- exactly
+the upstream convention. GW, however, would compare empty-video
+distances against real-audio distances, which is meaningless.
+We therefore mask to the \texttt{video\_exist=True} subset
+before building $\DV$, and skip the step entirely if the subset
+has fewer than \texttt{min\_batch=4} samples. This is the only
+place our loss treats the two data types differently from
+upstream; flow matching continues to see the full batch.
+
+When running under DDP, the GW loss is computed per-rank on the
+local real-video subset and summed into the total loss before
+\texttt{.backward()}. DDP's all-reduce then averages gradients
+across ranks. This is an approximation --- the ``true''
+batch-level GW on a global batch of size $B W$ would be a
+different objective --- but it is cheap and consistent with the
+rest of the training loop; a global-batch GW would require an
+extra all-gather per step.
+
+\subsection{What our term does that MMAudio's cannot}
+\label{sec:method:what-changes}
+Restating the positioning argument concretely, with the
+motivating diagnostics of Sec.\,\ref{sec:intro:motivation} as
+empirical context. All three
+cross-modal mechanisms in MMAudio --- joint MMDiT attention, the
+Conditional Synchronization Module, and empty-token masking ---
+produce, at the level of the loss, terms of the form
+$\mathcal{L}_i = \ell(f_\theta(z_i^{\text{video}}),
+x_i^{\text{audio}})$, i.e. a function of a \emph{single} paired
+$(z_i, x_i)$. In the decomposition of
+\citet{wang2020understanding}, they are pure alignment terms.
+$\LGW$ adds a term of the form
+\[
+  \mathcal{L}_{\mathrm{rel}} = \phi\bigl(
+    \{ \lVert v_i - v_k \rVert \}_{i,k},
+    \{ \lVert a_j - a_\ell \rVert \}_{j,\ell}
+  \bigr),
+\]
+which is not expressible as a sum of per-pair terms. Two models
+can have identical $\LFM$ and still differ arbitrarily in
+$\LGW$: shuffle the per-sample offsets of the audio latent
+manifold without changing paired distances, and $\LFM$ is
+unchanged while $\LGW$ changes. This is the precise sense in
+which the two loss terms are orthogonal.
+
+\subsection{Engineering integration}
+\label{sec:method:integration}
+The GW loss is called from \texttt{Runner.train\_pass} in
+\texttt{mmaudio/runner.py} \emph{after} the flow-matching forward,
+and crucially \emph{outside} the \texttt{torch.compile}d
+\texttt{train\_fn}. Compilation is a large speedup for the
+transformer but would bake the Sinkhorn iterations into an inner
+CUDA graph and make debugging numerics very painful; keeping GW
+out of the compiled region costs little because its overhead is
+dominated by the $B{\times}B$ matmuls, not kernel launch overhead.
+
+Concretely, we snapshot the pre-CFG-null $\text{clip}_f$ before
+\texttt{train\_fn} mutates it in place (the snapshot is needed
+because the mutation fills rows with \texttt{empty\_clip\_feat}
+for classifier-free guidance), normalize the audio latent with the
+same $(\mu,\sigma)$ used inside the network, call
+\texttt{compute\_gw\_regularization}, and add
+$\lambda_{\mathrm{GW}}(t_{\text{step}}) \cdot \LGW$ to the total
+loss. Effective $\lambda_{\mathrm{GW}}$ is logged alongside
+$\LGW$ and $\LFM$ at every \texttt{log\_text\_interval}.
