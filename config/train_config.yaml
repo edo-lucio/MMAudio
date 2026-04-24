@@ -12,7 +12,7 @@ hydra:
 ema: 
   start: 0
 
-mini_train: False
+mini_train: True
 example_train: False
 enable_grad_scaler: False
 vgg_oversample_rate: 5

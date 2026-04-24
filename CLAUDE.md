@@ -1,392 +1,142 @@
-# Thesis: Relational Cross-Modal Alignment via GW Regularization for V2A Flow Matching
+# CLAUDE.md
 
-## Project structure
-- `src/` — training code (flow matching, GW loss, Sinkhorn solver, model)
-- `thesis/chapters/` — LaTeX chapters
-- `thesis/figures/` — plots, diagrams
-- `results/` — experiment logs, metric CSVs
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Thesis argument (one paragraph)
-Pointwise objectives (contrastive, attention, adaLN) align instances but not 
-relational geometry. We add a GW penalty between intra-video and intra-audio 
-pairwise distance matrices, solved via entropic relaxation + Sinkhorn. 
-Tested across 5 design axes (D1–D5) against FAD/PaSST/ImageBind/DeSync metrics.
+## Repo purpose
 
-## LaTeX conventions
-- Class: article, 11pt, natbib with (round, authoryear)
-- Math macros defined in preamble: \LFM, \LGW, \LFGW, \DV, \DA, \Tstar, \R, \E
-- Always use these — never redefine or inline them
-- Figures: \includegraphics{figures/name}, use booktabs for all tables
-- Sinkhorn numerics note: float32 only, bfloat16 is brittle (already documented)
+Research fork of **MMAudio** (CVPR 2025, Cheng et al.) that adds a **Gromov-Wasserstein (GW) regularizer** to the flow-matching V2A training objective. The fork doubles as the codebase and the thesis write-up:
 
-## Chapter map
-- intro.tex — motivation, pointwise vs relational gap, contributions
-- background.tex — flow matching, GW/FGW, existing V2A models (MMAudio, Synchformer)
-- method.tex — formalization (Sec 3 of proposal), FGW, training objective
-- design.tex — D1–D5 design axes and justifications
-- experiments.tex — H1–H5 hypotheses, ablation grid, metrics
-- results.tex — filled in after experiments run
-- conclusion.tex — scope/limitations (Sec 6), expected contributions (Sec 7)
+- `train.py`, `mmaudio/`, `config/`, `experiments/`, `jobs/` — training, eval, and cluster scripts.
+- `thesis/` — LaTeX thesis (chapters, figures, `refs.bib`).
+- `SETUP.md` is the authoritative end-to-end setup/experiment guide; prefer it over re-deriving install or data-prep steps.
 
-## Key references already in refs.bib
-memoli2011gw, peyre2016gw, peyre2019computational, vayer2019fgw, 
-cuturi2013sinkhorn, tong2023ot, cheng2024mmaudio, iashin2024synchformer,
-lipman2022flow, radford2021clip
+## Code architecture (big picture)
 
-%% ============================================================
-%% CORE PAPERS
-%% ============================================================
+The training pipeline is a Hydra-configured DDP flow-matching trainer that **never extracts features at step time** — CLIP, Synchformer, and VAE latents are all precomputed into memmapped TensorDicts. This is the most important fact about the repo: the hot training loop only does flow-matching (+ optional GW) on cached tensors.
 
-@inproceedings{cheng2024mmaudio,
-  title     = {{MMAudio}: Taming Multimodal Joint Training for High-Quality Video-to-Audio Synthesis},
-  author    = {Cheng, Ho Kei and Ishii, Masato and Hayakawa, Akio and Shibuya, Takashi and Schwing, Alexander and Mitsufuji, Yuki},
-  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
-  year      = {2025},
-  eprint    = {2412.15322},
-  archivePrefix = {arXiv}
-}
+Call graph:
 
-@article{zhou2025fgwclip,
-  title     = {Fused {Gromov-Wasserstein} Contrastive Learning for Effective Enzyme-Reaction Screening},
-  author    = {Zhou, Gengmo and others},
-  journal   = {arXiv preprint arXiv:2512.08508},
-  year      = {2025}
-}
+```
+train.py  (Hydra entry; distributed_setup; seeds; dataset + loader plumbing)
+  └─ mmaudio/runner.py :: Runner
+        ├─ mmaudio/model/networks.py :: get_my_mmaudio     # DiT; DDP-wrapped
+        ├─ mmaudio/model/flow_matching.py :: FlowMatching  # LFM loss + Euler sampler
+        ├─ mmaudio/model/gw_regularization.py              # LGW / LFGW (see below)
+        └─ nitrous_ema.PostHocEMA                          # post-hoc EMA buffers
+```
 
-%% ============================================================
-%% OPTIMAL TRANSPORT — FOUNDATIONS
-%% ============================================================
+`Runner.train_pass` is where GW is injected: `train_fn` (compiled) returns the FM loss + features; GW is computed **after** in fp32 over the `video_exist=True` subset, then added with `lambda_schedule`. `train_fn` and `val_fn` are compiled **separately** on purpose — merging them destroys performance. `torch.compile` is on by default (`compile=False` to disable when debugging).
 
-@book{villani2009optimal,
-  title     = {Optimal Transport: Old and New},
-  author    = {Villani, C{\'e}dric},
-  volume    = {338},
-  year      = {2009},
-  publisher = {Springer}
-}
+GW variants in `mmaudio/model/gw_regularization.py::compute_gw_regularization`:
+- `global` — pairwise dists on raw CLIP avg-pool vs normalized `a_mean` avg-pool
+- `projected` — same but after `clip_input_proj` / `audio_input_proj`
+- `c_g` — uses the video contribution to the global conditioning `c_g`
+- `fused` — FGW with a cosine cross-domain cost
 
-@article{peyre2019computational,
-  title     = {Computational Optimal Transport},
-  author    = {Peyr{\'e}, Gabriel and Cuturi, Marco},
-  journal   = {Foundations and Trends in Machine Learning},
-  volume    = {11},
-  number    = {5--6},
-  pages     = {355--607},
-  year      = {2019}
-}
+Data flow: `mmaudio/data/extracted_vgg.py` + `extracted_audio.py` are memmap-backed datasets; `mm_dataset.py` mixes them. Extraction scripts live in `training/` (video: `extract_video_training_latents.py`, audio: `extract_audio_training_latents.py`).
 
-@inproceedings{peyre2016gromov,
-  title     = {{Gromov-Wasserstein} Averaging of Kernel and Distance Matrices},
-  author    = {Peyr{\'e}, Gabriel and Cuturi, Marco and Solomon, Justin},
-  booktitle = {Proceedings of the 33rd International Conference on Machine Learning},
-  pages     = {2664--2672},
-  year      = {2016}
-}
+External encoders/decoders live under `mmaudio/ext/` (autoencoder/VAE, BigVGAN vocoder, Synchformer). Their weights are loaded from `ext_weights/` — see `config/base_config.yaml` for the paths.
 
-@inproceedings{cuturi2013sinkhorn,
-  title     = {Sinkhorn Distances: Lightspeed Computation of Optimal Transport},
-  author    = {Cuturi, Marco},
-  booktitle = {Advances in Neural Information Processing Systems},
-  volume    = {26},
-  year      = {2013}
-}
+## Configuration (Hydra)
 
-@article{vayer2020fused,
-  title     = {Fused {Gromov-Wasserstein} Distance for Structured Objects},
-  author    = {Vayer, Titouan and Chapel, Laetitia and Flamary, R{\'e}mi and Tavenard, Romain and Courty, Nicolas},
-  journal   = {Algorithms},
-  volume    = {13},
-  number    = {9},
-  pages     = {212},
-  year      = {2020},
-  publisher = {MDPI},
-  doi       = {10.3390/a13090212}
-}
+Config composes `config/base_config.yaml` ← `config/train_config.yaml` (with `data: base` from `config/data/base.yaml`). Override anything on the CLI:
 
-@inproceedings{xu2020gromov,
-  title     = {{Gromov-Wasserstein} Learning for Graph Matching and Node Embedding},
-  author    = {Xu, Hongteng and Luo, Dixin and Carin, Lawrence},
-  booktitle = {Proceedings of the 36th International Conference on Machine Learning},
-  pages     = {10468--10478},
-  year      = {2019},
-  volume    = {97},
-  series    = {Proceedings of Machine Learning Research},
-  publisher = {PMLR}
-}
+```bash
+torchrun --standalone --nproc_per_node=N train.py \
+    exp_id=my_run \
+    model=small_16k \
+    gw_regularization.enabled=true \
+    gw_regularization.variant=global \
+    gw_regularization.lambda_gw=0.01 \
+    batch_size=64 compile=False
+```
 
-@inproceedings{chapel2020partial,
-  title     = {Partial Optimal Transport with Applications on Positive-Unlabeled Learning},
-  author    = {Chapel, Laetitia and Flamary, R{\'e}mi and Wu, Haoran and F{\'e}votte, C{\'e}dric and Gasso, Gilles},
-  booktitle = {Advances in Neural Information Processing Systems},
-  volume    = {33},
-  year      = {2020}
-}
+- `exp_id` is the single knob that controls the run directory (`./output/${exp_id}`) and **auto-resume**: re-running with the same `exp_id` picks up `<exp_id>_ckpt_last.pth`. Change `exp_id` to start fresh.
+- `model` must end with `16k` or `44k` (routes to `CONFIG_16K` / `CONFIG_44K` in `mmaudio/model/sequence_config.py`).
+- `_v2` networks (e.g. `mmaudio_large_44k_v2.pth`) are **inference-only** — they cannot be trained with this script.
 
-@inproceedings{lipman2022flow,
-  title     = {Flow Matching for Generative Modeling},
-  author    = {Lipman, Yaron and Chen, Ricky T. Q. and Ben-Hamu, Heli and Nickel, Maximilian and Le, Matt},
-  booktitle = {International Conference on Learning Representations},
-  year      = {2023},
-  eprint    = {2210.02747},
-  archivePrefix = {arXiv}
-}
+## Common commands
 
-@article{tong2023improving,
-  title     = {Improving and Generalizing Flow-Based Generative Models with Minibatch Optimal Transport},
-  author    = {Tong, Alexander and Malkin, Nikolay and Huguet, Guillaume and Zhang, Yanlei and Rector-Brooks, Jarrid and Fatras, Kilian and Wolf, Guy and Bengio, Yoshua},
-  journal   = {arXiv preprint arXiv:2302.00482},
-  year      = {2023}
-}
+All training/eval commands assume you've run `pip install -e .` and have `ext_weights/` + precomputed memmaps in place. See `SETUP.md` for the slow one-time data prep; the commands below are the ones you run repeatedly.
 
-@inproceedings{albergo2023stochastic,
-  title     = {Stochastic Interpolants: A Unifying Framework for Flows and Diffusions},
-  author    = {Albergo, Michael S. and Boffi, Nicholas M. and Vanden-Eijnden, Eric},
-  journal   = {arXiv preprint arXiv:2303.08797},
-  year      = {2023}
-}
+```bash
+# Smoke test (1 GPU, no learning, just confirms the pipeline runs):
+OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=1 train.py \
+    exp_id=debug compile=False debug=True example_train=True batch_size=1
 
-@article{song2021scorebased,
-  title     = {Score-Based Generative Modeling through Stochastic Differential Equations},
-  author    = {Song, Yang and Sohl-Dickstein, Jascha and Kingma, Diederik P. and Kumar, Abhishek and Ermon, Stefano and Poole, Ben},
-  journal   = {arXiv preprint arXiv:2011.13456},
-  year      = {2021}
-}
+# Baseline training (GW off), 2 GPUs:
+OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=2 train.py \
+    exp_id=baseline_small_16k model=small_16k
 
-%% ============================================================
-%% OT IN REPRESENTATION / CONTRASTIVE LEARNING
-%% ============================================================
+# Full GW experiment sweep driver (baseline, variants, lambda, detach, schedule, ood, gwxsync, all):
+GPUS=8 ITERS=300000 MODEL=small_16k bash experiments/run_gw_experiments.sh <group>
 
-@inproceedings{chen2020graph,
-  title     = {Graph Optimal Transport for Cross-Domain Alignment},
-  author    = {Chen, Liqun and Chen, Zhe and Dong, Liangliang and Zhou, Wenbing and Fan, Changyou and Carin, Lawrence and Li, Junzhou},
-  booktitle = {Proceedings of the 37th International Conference on Machine Learning},
-  pages     = {1542--1553},
-  year      = {2020}
-}
+# Feature extraction (edit the constants at the top of the script first):
+torchrun --standalone --nproc_per_node=N training/extract_video_training_latents.py
+python  training/partition_clips.py
+torchrun --standalone --nproc_per_node=N training/extract_audio_training_latents.py
 
-@inproceedings{courty2017joint,
-  title     = {Joint Distribution Optimal Transportation for Domain Adaptation},
-  author    = {Courty, Nicolas and Flamary, R{\'e}mi and Habrard, Amaury and Rakotomamonjy, Alain},
-  booktitle = {Advances in Neural Information Processing Systems},
-  volume    = {30},
-  year      = {2017}
-}
+# Batch eval (FD / IS / IB / DeSync) on a trained checkpoint:
+OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=4 batch_eval.py \
+    duration_s=8 dataset=vggsound model=small_16k num_workers=8 \
+    weights=output/<exp_id>/<exp_id>_ema_final.pth
 
-@inproceedings{flamary2021pot,
-  title     = {{POT}: {Python} Optimal Transport},
-  author    = {Flamary, R{\'e}mi and Courty, Nicolas and Gramfort, Alexandre and Alaya, Mokhtar Z. and Boisbunon, Aur{\'e}lie and Chambon, Stanislas and Chapel, Laetitia and Corenflos, Adrien and Fatras, Kilian and Fournier, Nemo and others},
-  journal   = {Journal of Machine Learning Research},
-  volume    = {22},
-  number    = {78},
-  pages     = {1--8},
-  year      = {2021}
-}
+# Demo (text + optional video):
+python demo.py --duration=8 --video=<path> --prompt "..."
+```
 
-%% ============================================================
-%% AUDIO-VISUAL ALIGNMENT & SYNCHRONIZATION
-%% ============================================================
+### Checkpoint flavors
 
-@inproceedings{iashin2024synchformer,
-  title     = {{Synchformer}: Efficient Synchronization from Sparse Cues},
-  author    = {Iashin, Vladimir and Xie, Weidi and Rahtu, Esa and Zisserman, Andrew},
-  booktitle = {IEEE International Conference on Acoustics, Speech and Signal Processing},
-  year      = {2024}
-}
+Produced in `output/<exp_id>/`:
+- `<exp_id>_last.pth` — weights only.
+- `<exp_id>_ckpt_last.pth` — weights + optimizer + scheduler + EMA (used for resuming).
+- `<exp_id>_ema_final.pth` — synthesized **post-training** from EMA buffers via `mmaudio/utils/synthesize_ema.py`. Use this for eval/demo.
 
-@inproceedings{morgado2021audiovisual,
-  title     = {Audio-Visual Instance Discrimination with Cross-Modal Agreement},
-  author    = {Morgado, Pedro and Vasconcelos, Nuno and Misra, Ishan},
-  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
-  pages     = {12475--12486},
-  year      = {2021}
-}
+### GW analysis scripts (`experiments/`)
 
-@inproceedings{owens2018audio,
-  title     = {Audio-Visual Scene Analysis with Self-Supervised Multisensory Features},
-  author    = {Owens, Andrew and Efros, Alexei A.},
-  booktitle = {Proceedings of the European Conference on Computer Vision},
-  pages     = {631--648},
-  year      = {2018}
-}
+- `analyze_couplings.py` — inspect learned T\*; requires the run was launched with `gw_regularization.save_couplings=true`.
+- `analysis.py curves --runs output/gw_*` — compare training curves across the sweep.
+- `diagnose_geometry.py` — pairwise-distance diagnostics.
+- `make_ood_split.py` — produces `sets/vgg3-{train,test}-ood.tsv` for the OOD group.
 
-@inproceedings{afouras2020self,
-  title     = {Self-Supervised Learning of Audio-Visual Objects from Video},
-  author    = {Afouras, Triantafyllos and Owens, Andrew and Chung, Joon Son and Zisserman, Andrew},
-  booktitle = {Proceedings of the European Conference on Computer Vision},
-  pages     = {208--224},
-  year      = {2020}
-}
+## Cluster / SLURM workflow
 
-@inproceedings{chen2021localizing,
-  title     = {Localizing Visual Sounds the Hard Way},
-  author    = {Chen, Honglie and Xie, Weidi and Afouras, Triantafyllos and Nagrani, Arsha and Vedaldi, Andrea and Zisserman, Andrew},
-  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
-  pages     = {16867--16876},
-  year      = {2021}
-}
+**Always** use the templates in `jobs/` for SLURM submissions — they encode non-obvious cluster constraints:
 
-@inproceedings{owens2016visually,
-  title     = {Visually Indicated Sounds},
-  author    = {Owens, Andrew and Isola, Phillip and McDermott, Josh and Torralba, Antonio and Adelson, Edward H. and Freeman, William T.},
-  booktitle = {Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition},
-  pages     = {2524--2533},
-  year      = {2016}
-}
+- `jobs/_header.sh` and `jobs/_common.sh` load CUDA/NCCL/Miniconda modules, activate the env, `cd` to the repo, cap thread pools, and alias `sets/vgg-*.tsv` → `sets/vgg3-*.tsv`. Source `_header.sh` from every job after the `#SBATCH` block.
+- **RLIMIT_NPROC on this cluster is ~12.** `_common.sh` therefore pins `OMP_NUM_THREADS=4`, `OPENBLAS_NUM_THREADS=2`, `MKL_NUM_THREADS=2`, `NUMEXPR_NUM_THREADS=2`, `VECLIB_MAXIMUM_THREADS=2`. Keep `#SBATCH --cpus-per-task` ≤ ~12 and `num_workers × GPUs` within that budget, or BLAS will either crash or silently hang during `import torch` (symptom: empty stdout, because Python never finishes importing).
+- Config mentions `sets/vgg3-*.tsv` but the repo ships `sets/vgg-*.tsv` — `_common.sh` copies them on first run. Don't delete the copies.
 
-%% ============================================================
-%% VIDEO-TO-AUDIO SYNTHESIS
-%% ============================================================
+Existing job scripts (`train_baseline.job`, `train_variants.job`, `train_lambda.job`, `train_detach.job`, `train_schedule.job`, `train_ood.job`, `train_gwxsync.job`, `eval.job`, `eval_all.job`, `extract_features.job`, `analysis.job`, `diagnose_geometry.job`) are the canonical entry points — prefer parameterizing them (`EXP_ID=… MODEL=… ITERS=… GPUS=… sbatch ...`) over writing new ones.
 
-@inproceedings{luo2024difffoley,
-  title     = {Diff-Foley: Synchronized Video-to-Audio Synthesis with Latent Diffusion Models},
-  author    = {Luo, Simian and Yan, Chuanhao and Hu, Chenxu and Zhao, Hang},
-  booktitle = {Advances in Neural Information Processing Systems},
-  volume    = {37},
-  year      = {2024}
-}
+## Gotchas
 
-@inproceedings{wang2024frieren,
-  title     = {Frieren: Efficient Video-to-Audio Generation with Rectified Flow Matching},
-  author    = {Wang, Yongqi and Guo, Wenxiang and Huang, Rongjie and Huang, Jiawei and Wang, Zehan and You, Fuming and Li, Ruiqi and Zhao, Zhou},
-  booktitle = {Advances in Neural Information Processing Systems},
-  year      = {2024}
-}
+These bite on long runs. In priority order:
 
-@inproceedings{jeong2024rewas,
-  title     = {Read, Watch and Scream! Sound Generation from Text and Video},
-  author    = {Jeong, Yujin and Kim, Yunji and Chun, Sanghyuk and Lee, Jiyoung},
-  journal   = {arXiv preprint arXiv:2407.05551},
-  year      = {2024}
-}
+- **Sinkhorn is fp32-only.** `compute_gw_regularization` casts explicitly; bf16 produces NaNs. Don't "optimize" this.
+- **`GradScaler` is disabled** (`enable_grad_scaler: False`). This is deliberate (Feb 2025 stability fix, see README changelog), not an oversight.
+- **In-place mutations in the model:** `MMAudio.normalize` / `unnormalize` and `a_mean.sub_().div_()` modify their inputs. `clip_f` is also mutated in-place inside `train_fn` for CFG null-masking. `runner.py::train_pass` clones before calling the GW regularizer — preserve that if you edit it.
+- **Validation RNG:** `eval_rng_clone` is used so val/eval is reproducible across runs. Don't draw from `trainer.rng` inside val/eval without snapshotting.
+- **Same `exp_id` = resume**, not overwrite. Change `exp_id` (or delete `output/<exp_id>/<exp_id>_ckpt_last.pth`) to start over.
+- **`num_workers` is per-GPU**, multiplied by `--nproc_per_node`. Easy to exceed the nproc budget.
 
-@article{zhang2024foleycrafter,
-  title     = {{FoleyCrafter}: Bring Silent Videos to Life with Lifelike and Synchronized Sounds},
-  author    = {Zhang, Yiming and Gu, Yicheng and Zeng, Yanhong and Xing, Zhening and Wang, Yuancheng and Wu, Zhizheng and Chen, Kai},
-  journal   = {arXiv preprint arXiv:2407.01494},
-  year      = {2024}
-}
+## Thesis conventions
 
-@inproceedings{viertola2024vaura,
-  title     = {Temporally Aligned Audio for Video with Autoregression},
-  author    = {Viertola, Ilpo and Iashin, Vladimir and Rahtu, Esa},
-  journal   = {arXiv preprint arXiv:2409.13689},
-  year      = {2024}
-}
+- Class: `article`, 11pt, `natbib` with `(round, authoryear)`.
+- Math macros (defined in `thesis/thesis.tex` preamble): `\LFM, \LGW, \LFGW, \DV, \DA, \Tstar, \R, \E`. Always use them; never redefine or inline.
+- Figures: `\includegraphics{figures/name}`; tables use `booktabs`.
+- Bibliography: `thesis/refs.bib` — ~40 entries covering OT foundations, flow matching, V2A, audio-visual alignment, multimodal backbones. Add new keys there; don't duplicate them into this file.
 
-@inproceedings{liu2024vatt,
-  title     = {Tell What You Hear from What You See -- Video to Audio Generation through Text},
-  author    = {Liu, Xiulong and Su, Kun and Shlizerman, Eli},
-  booktitle = {Advances in Neural Information Processing Systems},
-  year      = {2024}
-}
+### Chapter map (`thesis/chapters/`)
 
-@inproceedings{wang2024v2amapper,
-  title     = {{V2A-Mapper}: A Lightweight Solution for Vision-to-Audio Generation by Connecting Foundation Models},
-  author    = {Wang, Heng and Ma, Jianbo and Pascual, Santiago and Cartwright, Richard and Cai, Weidong},
-  booktitle = {Proceedings of the AAAI Conference on Artificial Intelligence},
-  year      = {2024}
-}
-%% ============================================================
-%% BACKBONE MODELS USED IN MMAUDIO
-%% ============================================================
+- `intro.tex` — motivation, pointwise vs relational gap, contributions.
+- `background.tex` — flow matching, GW/FGW, existing V2A models (MMAudio, Synchformer).
+- `method.tex` — formalization, FGW, training objective.
+- `design.tex` — D1–D5 design axes and justifications.
+- `experiments.tex` — H1–H5 hypotheses, ablation grid, metrics.
+- `results.tex` — filled in after experiments run.
+- `conclusion.tex` — scope/limitations, expected contributions.
 
-@inproceedings{esser2024scaling,
-  title     = {Scaling Rectified Flow Transformers for High-Resolution Image Synthesis},
-  author    = {Esser, Patrick and Kulal, Sumith and Blattmann, Andreas and Entezari, Rahim and M{\"u}ller, Jonas and Saini, Harry and Levi, Yam and Lorenz, Dominik and Sauer, Axel and Boesel, Frederic and others},
-  booktitle = {Proceedings of the 41st International Conference on Machine Learning},
-  year      = {2024}
-}
+### Thesis argument (one paragraph)
 
-@misc{blackforestlabs2024flux,
-  title     = {{FLUX}},
-  author    = {{Black Forest Labs}},
-  howpublished = {\url{https://github.com/black-forest-labs/flux}},
-  year      = {2024}
-}
-
-@inproceedings{radford2021learning,
-  title     = {Learning Transferable Visual Models from Natural Language Supervision},
-  author    = {Radford, Alec and Kim, Jong Wook and Hallacy, Chris and Ramesh, Aditya and Goh, Gabriel and Agarwal, Sandhini and Sastry, Girish and Askell, Amanda and Mishkin, Pamela and Clark, Jack and others},
-  booktitle = {Proceedings of the 38th International Conference on Machine Learning},
-  pages     = {8748--8763},
-  year      = {2021}
-}
-
-@inproceedings{lin2023musicldm,
-  title     = {{MusicLDM}: Enhancing Novelty in Text-to-Music Generation Using Beat-Synchronous Mixup Strategies},
-  author    = {Chen, Ke and Wu, Yusong and Liu, Haohe and Nezhurina, Marianna and Berg-Kirkpatrick, Taylor and Dubnov, Shlomo},
-  booktitle = {IEEE International Conference on Acoustics, Speech and Signal Processing},
-  year      = {2024}
-}
-
-@inproceedings{lee2023bigvgan,
-  title     = {{BigVGAN}: A Universal Neural Vocoder with Large-Scale Training},
-  author    = {Lee, Sang-gil and Ping, Wei and Ginsburg, Boris and Catanzaro, Bryan and Yoon, Sungroh},
-  booktitle = {International Conference on Learning Representations},
-  year      = {2023}
-}
-
-@inproceedings{girdhar2023imagebind,
-  title     = {{ImageBind}: One Embedding Space to Bind Them All},
-  author    = {Girdhar, Rohit and El-Nouby, Alaaeldin and Liu, Zhuang and Singh, Mannat and Alwala, Kalyan Vasudev and Joulin, Armand and Misra, Ishan},
-  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
-  pages     = {15180--15190},
-  year      = {2023}
-}
-
-@inproceedings{su2024roformer,
-  title     = {{RoFormer}: Enhanced Transformer with Rotary Position Embedding},
-  author    = {Su, Jianlin and Ahmed, Murtadha and Lu, Yu and Pan, Shengfeng and Bo, Wen and Liu, Yunfeng},
-  journal   = {Neurocomputing},
-  volume    = {568},
-  pages     = {127063},
-  year      = {2024}
-}
-
-@article{chen2024vggsound,
-  title     = {{VGGSound}: A Large-Scale Audio-Visual Dataset},
-  author    = {Chen, Honglie and Xie, Weidi and Vedaldi, Andrea and Zisserman, Andrew},
-  booktitle = {IEEE International Conference on Acoustics, Speech and Signal Processing},
-  year      = {2020}
-}
-
-@inproceedings{kim2019audiocaps,
-  title     = {{AudioCaps}: Generating Captions for Audios in the Wild},
-  author    = {Kim, Chris Dongjoo and Kim, Byeongchang and Lee, Hyunmin and Kim, Gunhee},
-  booktitle = {Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies},
-  pages     = {119--132},
-  year      = {2019}
-}
-
-@article{mei2024wavcaps,
-  title     = {{WavCaps}: A {ChatGPT}-Assisted Weakly-Labelled Audio Captioning Dataset for Audio-Language Multimodal Research},
-  author    = {Mei, Xinhao and Meng, Chutong and Liu, Haohe and Kong, Qiuqiang and Ko, Tom and Zhao, Chengqi and Plumbley, Mark D. and Zou, Yuexian and Wang, Wenwu},
-  journal   = {IEEE/ACM Transactions on Audio, Speech, and Language Processing},
-  year      = {2024}
-}
-
-@inproceedings{perez2018film,
-  title     = {{FiLM}: Visual Reasoning with a General Conditioning Layer},
-  author    = {Perez, Ethan and Strub, Florian and De Vries, Harm and Dumoulin, Vincent and Courville, Aaron},
-  booktitle = {Proceedings of the AAAI Conference on Artificial Intelligence},
-  volume    = {32},
-  year      = {2018}
-}
-
-%% ============================================================
-%% MULTIMODAL LEARNING & BINDING
-%% ============================================================
-
-@inproceedings{zhu2024languagebind,
-  title     = {{LanguageBind}: Extending Video-Language Pretraining to $N$-Modality by Language-Based Semantic Alignment},
-  author    = {Zhu, Bin and Lin, Bin and Ning, Munan and Yan, Yang and Cui, Jiaxi and Wang, HongFa and Pang, Yatian and Jiang, Wenhao and Zhang, Junwu and Li, Zongwei and others},
-  booktitle = {International Conference on Learning Representations},
-  year      = {2024}
-}
-
-@article{polyak2024moviegen,
-  title     = {{Movie Gen}: A Cast of Media Foundation Models},
-  author    = {Polyak, Adam and Zohar, Amit and Brown, Andrew and Tjandra, Andros and Sinha, Animesh and Lee, Ann and Vyas, Apoorv and Shi, Bowen and Ma, Chih-Yao and Chuang, Ching-Yao and others},
-  journal   = {arXiv preprint arXiv:2410.13720},
-  year      = {2024}
-}
+Pointwise objectives (contrastive, attention, adaLN) align instances but not relational geometry. We add a GW penalty between intra-video and intra-audio pairwise distance matrices, solved via entropic relaxation + Sinkhorn. Tested across 5 design axes (D1–D5) against FAD / PaSST / ImageBind / DeSync metrics.
