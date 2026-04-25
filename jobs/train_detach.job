@@ -31,6 +31,15 @@ source /opt/itu/easybuild/software/Miniconda3/25.5.1-1/etc/profile.d/conda.sh
 conda activate "$ENV_PATH"
 cd "$PROJECT_DIR"
 
+# --- 3. Avoid `import torch` hang on shared FS ---
+# Skip torch's third-party device-backend autoloader (PyTorch >= 2.5 honors this).
+# Pre-warm the FS cache by importing torch once, single-process, before torchrun
+# spawns multiple ranks competing for the same dist-info files on NFS.
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+echo "Pre-warming torch import cache..."
+time python -c "import torch; print('torch', torch.__version__)"
+echo "Cache warm."
+
 mkdir -p logs output
 
 DETACH=(true false)
