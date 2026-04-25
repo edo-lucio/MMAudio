@@ -45,7 +45,7 @@ synchformer_ckpt = './ext_weights/synchformer_state_dict.pth'
 
 # per-GPU
 BATCH_SIZE = 16
-NUM_WORKERS = 16
+NUM_WORKERS = 8
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
