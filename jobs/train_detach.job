@@ -5,19 +5,33 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=128G
-#SBATCH --time=48:00:00
+#SBATCH --mem=32G
+#SBATCH --time=24:00:00
 #SBATCH --partition=acltr
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:2
 #SBATCH --array=0-1
 
-# Experiment 4: detach_video ablation.
+# Experiment 4: detach_video ablation. Each array task = 1 setting on 2 GPUs.
 #   0 -> detach_video=true  (default: shape audio to video)
 #   1 -> detach_video=false (both sides adapt)
 
+set -e
+set -x
+
+# --- 1. Environment & Path Definitions ---
 PROJECT_DIR="$HOME/MMA/MMAudio"
 ENV_PATH="/home/edlu/miniconda3-25-5-1-1/envs/gwot"
-source "$PROJECT_DIR/jobs/_header.sh"
+CONDA_BIN="/opt/itu/easybuild/software/Miniconda3/25.5.1-1/bin/conda"
+
+# --- 2. Load System Modules ---
+module load CUDA/12.1.1
+module load NCCL/2.18.3-GCCcore-12.3.0-CUDA-12.1.1
+module load Miniconda3/25.5.1-1
+source /opt/itu/easybuild/software/Miniconda3/25.5.1-1/etc/profile.d/conda.sh
+conda activate "$ENV_PATH"
+cd "$PROJECT_DIR"
+
+mkdir -p logs output
 
 DETACH=(true false)
 D="${DETACH[$SLURM_ARRAY_TASK_ID]}"
@@ -26,11 +40,8 @@ VAR="${BEST_VARIANT:-global}"
 MODEL="${MODEL:-small_16k}"
 ITERS="${ITERS:-300000}"
 LAMBDA="${LAMBDA:-0.01}"
-GPUS=1
 
-mkdir -p logs output
-
-torchrun --standalone --nproc_per_node="$GPUS" train.py \
+OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=2 train.py \
     exp_id="gw_detach_${D}" \
     model="$MODEL" \
     num_iterations="$ITERS" \
@@ -38,3 +49,5 @@ torchrun --standalone --nproc_per_node="$GPUS" train.py \
     gw_regularization.variant="$VAR" \
     gw_regularization.lambda_gw="$LAMBDA" \
     gw_regularization.detach_video="$D"
+
+echo "Done: gw_detach_${D}"

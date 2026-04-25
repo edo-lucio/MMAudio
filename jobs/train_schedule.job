@@ -5,20 +5,32 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=128G
-#SBATCH --time=48:00:00
+#SBATCH --mem=32G
+#SBATCH --time=24:00:00
 #SBATCH --partition=acltr
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:2
 #SBATCH --array=0-2
 
-# Experiment 5: lambda_schedule ablation.
-#   0 -> constant
-#   1 -> linear_rampup
-#   2 -> cosine_anneal
+# Experiment 5: lambda_schedule ablation. Each array task = 1 schedule on 2 GPUs.
+#   0 -> constant   1 -> linear_rampup   2 -> cosine_anneal
 
+set -e
+set -x
+
+# --- 1. Environment & Path Definitions ---
 PROJECT_DIR="$HOME/MMA/MMAudio"
 ENV_PATH="/home/edlu/miniconda3-25-5-1-1/envs/gwot"
-source "$PROJECT_DIR/jobs/_header.sh"
+CONDA_BIN="/opt/itu/easybuild/software/Miniconda3/25.5.1-1/bin/conda"
+
+# --- 2. Load System Modules ---
+module load CUDA/12.1.1
+module load NCCL/2.18.3-GCCcore-12.3.0-CUDA-12.1.1
+module load Miniconda3/25.5.1-1
+source /opt/itu/easybuild/software/Miniconda3/25.5.1-1/etc/profile.d/conda.sh
+conda activate "$ENV_PATH"
+cd "$PROJECT_DIR"
+
+mkdir -p logs output
 
 SCHEDULES=(constant linear_rampup cosine_anneal)
 S="${SCHEDULES[$SLURM_ARRAY_TASK_ID]}"
@@ -28,11 +40,8 @@ MODEL="${MODEL:-small_16k}"
 ITERS="${ITERS:-300000}"
 LAMBDA="${LAMBDA:-0.01}"
 WARMUP="${WARMUP:-50000}"
-GPUS=1
 
-mkdir -p logs output
-
-torchrun --standalone --nproc_per_node="$GPUS" train.py \
+OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=2 train.py \
     exp_id="gw_sched_${S}" \
     model="$MODEL" \
     num_iterations="$ITERS" \
@@ -41,3 +50,5 @@ torchrun --standalone --nproc_per_node="$GPUS" train.py \
     gw_regularization.lambda_gw="$LAMBDA" \
     gw_regularization.schedule="$S" \
     gw_regularization.warmup_steps="$WARMUP"
+
+echo "Done: gw_sched_${S}"
