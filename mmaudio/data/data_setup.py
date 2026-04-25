@@ -46,7 +46,7 @@ def load_audio_data(cfg: DictConfig, data_cfg: DictConfig) -> Dataset:
 def setup_training_datasets(cfg: DictConfig) -> tuple[Dataset, DistributedSampler, DataLoader]:
     if cfg.mini_train:
         vgg = load_vgg_data(cfg, cfg.data.ExtractedVGG_val)
-        dataset = MultiModalDataset([vgg])
+        dataset = MultiModalDataset([vgg], [])
     elif cfg.example_train:
         video = load_vgg_data(cfg, cfg.data.Example_video)
         audio = load_audio_data(cfg, cfg.data.Example_audio)
