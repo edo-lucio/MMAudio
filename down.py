@@ -35,7 +35,7 @@ from multiprocessing import Pool
 
 VGGSOUND_CSV_URL = "https://www.robots.ox.ac.uk/~vgg/data/vggsound/vggsound.csv"
 SETS_DIR = "sets"                    # local split manifests (vgg-*.tsv)
-OUTPUT_DIR = "./data/video"          # matches config/data/base.yaml VGGSound.root
+OUTPUT_DIR = "../data/video"         # matches config/data/base.yaml VGGSound.root
 MAX_BYTES = 5 * 1024 ** 3            # ~5 GB cap; change here for more/less
 # Per-split quotas. The *ratio* of these values determines the target proportion.
 # On resume the downloader computes per-split deficits (quota − already on disk)

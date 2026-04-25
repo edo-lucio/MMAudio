@@ -1,0 +1,113 @@
+#!/bin/bash
+#SBATCH --job-name=mma_download
+#SBATCH --output=logs/download_%j.out
+#SBATCH --error=logs/download_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=8G
+#SBATCH --time=24:00:00
+#SBATCH --partition=acltr
+# No --gres=gpu: this job does pure CPU yt-dlp + ffmpeg work.
+
+# Download a size-capped, split-balanced subset of VGGSound by wrapping down.py.
+#
+# What it does:
+#   1. Activates the conda env (yt-dlp + ffmpeg must be installed there).
+#   2. Sources cookies from a path that is accessible on the compute node.
+#   3. Runs down.py with the env-overridden quotas / cap.
+#
+# Output goes to ../data/video/<youtube_id>_<start:06d>.mp4 — the path the
+# training feature-extractor expects (per config/data/base.yaml VGGSound.root).
+#
+# REQUIRES: cookies.txt at $PROJECT_DIR/cookies.txt OR set COOKIES_FILE env var.
+#   See down.py for the export instructions. Without cookies, YouTube will
+#   bot-block almost every request.
+#
+# Submit:
+#   sbatch jobs/download_vggsound.job
+# Override quotas / cap on submission:
+#   sbatch --export=ALL,MAX_GB=20,Q_TRAIN=5000,Q_VAL=500,Q_TEST=1000 \
+#          jobs/download_vggsound.job
+
+set -e
+set -x
+
+# --- 1. Environment & Path Definitions ---
+PROJECT_DIR="$HOME/MMA/MMAudio"
+ENV_PATH="/home/edlu/miniconda3-25-5-1-1/envs/gwot"
+CONDA_BIN="/opt/itu/easybuild/software/Miniconda3/25.5.1-1/bin/conda"
+
+# --- 2. Load System Modules ---
+module load Miniconda3/25.5.1-1
+source /opt/itu/easybuild/software/Miniconda3/25.5.1-1/etc/profile.d/conda.sh
+conda activate "$ENV_PATH"
+cd "$PROJECT_DIR"
+
+# --- 3. Verify dependencies ---
+which yt-dlp || { echo "yt-dlp not on PATH"; exit 2; }
+which ffmpeg || { echo "ffmpeg not on PATH; install via conda: conda install -c conda-forge ffmpeg"; exit 2; }
+
+# --- 4. Pre-flight: confirm we can reach YouTube from the compute node ---
+# Many HPC compute nodes block outbound HTTPS to youtube.com. If this fails,
+# you'll need to run the download from the login node or a partition with egress.
+echo "Testing network egress to youtube.com..."
+if ! curl -fsS --max-time 10 -o /dev/null https://www.youtube.com; then
+    echo "ERROR: cannot reach youtube.com from this compute node."
+    echo "       Run the download from the login node instead, or pick a"
+    echo "       partition that allows outbound HTTPS."
+    exit 3
+fi
+echo "Egress OK."
+
+# --- 5. Cookie file (REQUIRED for any non-trivial batch) ---
+COOKIES_FILE="${COOKIES_FILE:-$PROJECT_DIR/cookies.txt}"
+if [ ! -f "$COOKIES_FILE" ]; then
+    echo "WARNING: $COOKIES_FILE not found. Download will likely bot-block."
+    echo "         To create one, run on a machine with a logged-in browser:"
+    echo "             yt-dlp --cookies-from-browser chrome --cookies cookies.txt \\"
+    echo "                    https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    echo "         Then scp cookies.txt to $COOKIES_FILE."
+fi
+
+# --- 6. Quotas / cap (override via --export=ALL,...) ---
+MAX_GB="${MAX_GB:-5}"
+Q_TRAIN="${Q_TRAIN:-850}"
+Q_VAL="${Q_VAL:-50}"
+Q_TEST="${Q_TEST:-100}"
+
+# --- 7. Run the downloader ---
+# Patch down.py constants in-place via sed-injected env reads at the top.
+# (Cleaner than editing the file; just exports a few vars down.py would
+#  otherwise hardcode.)
+PYTHONUNBUFFERED=1 python - <<PYEOF
+import os, sys, runpy
+
+# Override down.py module-level constants from the job env.
+sys.argv = ["down.py"]
+import importlib.util
+spec = importlib.util.spec_from_file_location("down", "down.py")
+mod  = importlib.util.module_from_spec(spec)
+
+# Pre-load module so we can mutate constants before its __main__ block runs.
+spec.loader.exec_module(mod)
+mod.MAX_BYTES     = int(${MAX_GB} * 1024**3)
+mod.SPLIT_QUOTAS  = {"val": ${Q_VAL}, "test": ${Q_TEST}, "train": ${Q_TRAIN}}
+mod.COOKIES_FILE  = os.environ.get("COOKIES_FILE") or "${COOKIES_FILE}"
+print(f"Effective config: MAX_BYTES={mod.MAX_BYTES/1e9:.1f} GB  quotas={mod.SPLIT_QUOTAS}")
+print(f"COOKIES_FILE={mod.COOKIES_FILE}  exists={os.path.exists(mod.COOKIES_FILE)}")
+
+# Re-run the __main__ block with the patched constants.
+import builtins
+builtins.__name__ = "__main__"
+runpy.run_path("down.py", run_name="__main__", init_globals={
+    "MAX_BYTES": mod.MAX_BYTES,
+    "SPLIT_QUOTAS": mod.SPLIT_QUOTAS,
+    "COOKIES_FILE": mod.COOKIES_FILE,
+})
+PYEOF
+
+echo "Download job complete."
+echo "Files at: $(realpath ../data/video)"
+ls ../data/video | wc -l
+du -sh ../data/video
