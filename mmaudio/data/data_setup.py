@@ -1,5 +1,6 @@
 import logging
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -45,24 +46,28 @@ def load_audio_data(cfg: DictConfig, data_cfg: DictConfig) -> Dataset:
 def setup_training_datasets(cfg: DictConfig) -> tuple[Dataset, DistributedSampler, DataLoader]:
     if cfg.mini_train:
         vgg = load_vgg_data(cfg, cfg.data.ExtractedVGG_val)
-        # audiocaps = load_audio_data(cfg, cfg.data.AudioCaps)
-        # dataset = MultiModalDataset([vgg], [audiocaps])
         dataset = MultiModalDataset([vgg])
-        
-    if cfg.example_train:
+    elif cfg.example_train:
         video = load_vgg_data(cfg, cfg.data.Example_video)
         audio = load_audio_data(cfg, cfg.data.Example_audio)
         dataset = MultiModalDataset([video], [audio])
     else:
-        # load the largest one first
-        freesound = load_audio_data(cfg, cfg.data.FreeSound)
         vgg = load_vgg_data(cfg, cfg.data.ExtractedVGG)
-        audiocaps = load_audio_data(cfg, cfg.data.AudioCaps)
-        audioset_sl = load_audio_data(cfg, cfg.data.AudioSetSL)
-        bbcsound = load_audio_data(cfg, cfg.data.BBCSound)
-        clotho = load_audio_data(cfg, cfg.data.Clotho)
-        dataset = MultiModalDataset([vgg] * cfg.vgg_oversample_rate,
-                                    [audiocaps, audioset_sl, bbcsound, freesound, clotho])
+
+        audio_datasets = []
+        for tag, data_cfg in [
+            ('AudioCaps', cfg.data.AudioCaps),
+            ('AudioSetSL', cfg.data.AudioSetSL),
+            ('BBCSound', cfg.data.BBCSound),
+            ('FreeSound', cfg.data.FreeSound),
+            ('Clotho', cfg.data.Clotho),
+        ]:
+            if Path(data_cfg.tsv).is_file():
+                audio_datasets.append(load_audio_data(cfg, data_cfg))
+            else:
+                log.warning(f'Skipping audio dataset {tag}: {data_cfg.tsv} not found')
+
+        dataset = MultiModalDataset([vgg] * cfg.vgg_oversample_rate, audio_datasets)
 
     batch_size = cfg.batch_size
     num_workers = cfg.num_workers
