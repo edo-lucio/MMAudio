@@ -53,17 +53,17 @@ log.setLevel(logging.INFO)
 # uncomment the train/test/val sets to extract latents for them
 data_cfg = {
     'train': {
-        'root': '../data/video',
+        'root': './data/video',
         'subset_name': './sets/vgg3-train.tsv',
         'normalize_audio': True,
     },
     'test': {
-        'root': '../data/video',
+        'root': './data/video',
         'subset_name': './sets/vgg3-test.tsv',
         'normalize_audio': False,
     },
     'val': {
-        'root': '../data/video',
+        'root': './data/video',
         'subset_name': './sets/vgg3-val.tsv',
         'normalize_audio': False,
     },
