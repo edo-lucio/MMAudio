@@ -44,7 +44,7 @@ NOTE: 352800 (8*44100) is not divisible by (STFT hop size * VAE downsampling rat
 synchformer_ckpt = './ext_weights/synchformer_state_dict.pth'
 
 # per-GPU
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 NUM_WORKERS = 8
 
 log = logging.getLogger()
