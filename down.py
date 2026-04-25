@@ -19,6 +19,9 @@ E.g. quotas val=50, test=100, train=850. If you already have val=48, test=30,
 train=200 on disk, the remaining quotas are val=2, test=70, train=650 and the
 new downloads are interleaved at that corrected ratio.
 
+Candidate clips are shuffled randomly before selection so that restarts explore
+different parts of the dataset instead of retrying the same failing videos.
+
 Requires: yt-dlp, ffmpeg on PATH.
 """
 
@@ -111,6 +114,10 @@ def parse_plan(
     """Return [(vid_id, youtube_id, start_sec), ...] interleaved proportionally
     across splits using *remaining* per-split quotas (quota − already on disk).
 
+    Candidates are shuffled randomly before slicing so that each run explores
+    a different subset of the available clips. This prevents repeated restarts
+    from retrying the same failing videos indefinitely.
+
     Sort key = i / remaining_quota, which places the i-th clip of each split
     at the correct fractional position in the global list. Because we use the
     remaining quota as the denominator, splits that still need many clips are
@@ -141,6 +148,7 @@ def parse_plan(
         have = existing_counts.get(split, 0)
         remaining = max(0, quota - have)
         candidates = buckets[split]          # already filtered above
+        random.shuffle(candidates)           # randomise so restarts vary
         chosen = candidates[:remaining]
         print(
             f"  {split}: {have} on disk + {len(chosen)} to fetch  "
