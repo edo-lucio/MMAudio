@@ -42,6 +42,7 @@ CONDA_BIN="/opt/itu/easybuild/software/Miniconda3/25.5.1-1/bin/conda"
 module load Miniconda3/25.5.1-1
 source /opt/itu/easybuild/software/Miniconda3/25.5.1-1/etc/profile.d/conda.sh
 conda activate "$ENV_PATH"
+export PATH="$ENV_PATH/bin:$PATH"
 cd "$PROJECT_DIR"
 
 # --- 3. Verify dependencies ---
@@ -80,7 +81,7 @@ Q_TEST="${Q_TEST:-100}"
 # Patch down.py constants in-place via sed-injected env reads at the top.
 # (Cleaner than editing the file; just exports a few vars down.py would
 #  otherwise hardcode.)
-PYTHONUNBUFFERED=1 python - <<PYEOF
+PYTHONUNBUFFERED=1 "$ENV_PATH/bin/python" - <<PYEOF
 import os, sys, runpy
 
 # Override down.py module-level constants from the job env.
