@@ -8,6 +8,8 @@
 #SBATCH --mem=32G
 #SBATCH --time=01:00:00
 #SBATCH --partition=acltr
+#SBATCH --mail-user=edlu@itu.dk
+#SBATCH --mail-type=FAIL
 
 # Offline plots + coupling matrices. No GPU required for curves;
 # analyze_couplings needs a GPU — split into a second job if needed.

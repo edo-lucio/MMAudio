@@ -10,6 +10,8 @@
 #SBATCH --partition=acltr
 #SBATCH --gres=gpu:2
 #SBATCH --array=0-1
+#SBATCH --mail-user=edlu@itu.dk
+#SBATCH --mail-type=FAIL,ARRAY_TASKS
 
 # Experiment 6: OOD generalization with a held-out training split.
 # Requires: experiments/make_ood_split.py has produced
@@ -50,10 +52,14 @@ VAR="${BEST_VARIANT:-global}"
 MODEL="${MODEL:-small_16k}"
 ITERS="${ITERS:-300000}"
 LAMBDA="${LAMBDA:-0.01}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE}}"
 
 COMMON=(
     data.VGGSound.subset_name=sets/vgg3-train-ood.tsv
     data.ExtractedVGG.tsv=../data/v1-16-memmap/vgg-train-ood.tsv
+    batch_size="$BATCH_SIZE"
+    eval_batch_size="$EVAL_BATCH_SIZE"
 )
 
 case "$SLURM_ARRAY_TASK_ID" in

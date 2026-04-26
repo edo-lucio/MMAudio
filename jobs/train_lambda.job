@@ -10,6 +10,8 @@
 #SBATCH --partition=acltr
 #SBATCH --gres=gpu:2
 #SBATCH --array=0-4
+#SBATCH --mail-user=edlu@itu.dk
+#SBATCH --mail-type=FAIL,ARRAY_TASKS
 
 # Experiment 3: lambda sweep at the best variant. Each array task = 1 lambda on 2 GPUs.
 #   0 -> 0.001   1 -> 0.005   2 -> 0.01   3 -> 0.05   4 -> 0.1
@@ -49,11 +51,15 @@ LAMBDA="${LAMBDAS[$SLURM_ARRAY_TASK_ID]}"
 VAR="${BEST_VARIANT:-global}"
 MODEL="${MODEL:-small_16k}"
 ITERS="${ITERS:-300000}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE}}"
 
 OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=2 train.py \
     exp_id="gw_lam_${VAR}_${LAMBDA}" \
     model="$MODEL" \
     num_iterations="$ITERS" \
+    batch_size="$BATCH_SIZE" \
+    eval_batch_size="$EVAL_BATCH_SIZE" \
     gw_regularization.enabled=true \
     gw_regularization.variant="$VAR" \
     gw_regularization.lambda_gw="$LAMBDA"

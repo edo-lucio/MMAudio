@@ -9,6 +9,8 @@
 #SBATCH --time=12:00:00
 #SBATCH --partition=acltr
 #SBATCH --gres=gpu:2
+#SBATCH --mail-user=edlu@itu.dk
+#SBATCH --mail-type=FAIL
 
 # One-off: precompute the VGGSound TensorDict latents consumed by every
 # training run. You must have ./data/video/*.mp4 populated (see down.py)
@@ -19,9 +21,9 @@ PROJECT_DIR="$HOME/MMA/MMAudio"
 ENV_PATH="/home/edlu/miniconda3-25-5-1-1/envs/gwot"
 source "$PROJECT_DIR/jobs/_header.sh"
 
-mkdir -p logs ../data/latents/video ../data/v1-16-memmap
+mkdir -p logs ./training/example_ouptut/latents/video ./training/example_output/v1-16-memmap
 
-torchrun --standalone --nproc_per_node=1 \
+torchrun --standalone --nproc_per_node=2 \
     training/extract_video_training_latents.py \
-    --latent_dir ../data/latents/video \
-    --output_dir ../data/v1-16-memmap
+    --latent_dir ./training/example_output/latents/video \
+    --output_dir ./training/example_output/v1-16-memmap

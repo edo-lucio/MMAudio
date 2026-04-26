@@ -9,6 +9,8 @@
 #SBATCH --time=06:00:00
 #SBATCH --partition=acltr
 #SBATCH --gres=gpu:1
+#SBATCH --mail-user=edlu@itu.dk
+#SBATCH --mail-type=FAIL
 
 # Batch evaluation on VGGSound test set.
 #

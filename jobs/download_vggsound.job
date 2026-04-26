@@ -8,6 +8,8 @@
 #SBATCH --mem=8G
 #SBATCH --time=24:00:00
 #SBATCH --partition=acltr
+#SBATCH --mail-user=edlu@itu.dk
+#SBATCH --mail-type=FAIL
 # No --gres=gpu: this job does pure CPU yt-dlp + ffmpeg work.
 
 # Download a size-capped, split-balanced subset of VGGSound by wrapping down.py.

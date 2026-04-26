@@ -10,6 +10,8 @@
 #SBATCH --partition=acltr
 #SBATCH --gres=gpu:2
 #SBATCH --array=0-3
+#SBATCH --mail-user=edlu@itu.dk
+#SBATCH --mail-type=FAIL,ARRAY_TASKS
 
 # Experiment 2: variant sweep. Each array task = 1 variant on 2 GPUs.
 #   0 -> global   1 -> projected   2 -> c_g   3 -> fused
@@ -49,11 +51,15 @@ VAR="${VARIANTS[$SLURM_ARRAY_TASK_ID]}"
 MODEL="${MODEL:-small_16k}"
 ITERS="${ITERS:-300000}"
 LAMBDA="${LAMBDA:-0.01}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE}}"
 
 OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=2 train.py \
     exp_id="gw_var_${VAR}" \
     model="$MODEL" \
     num_iterations="$ITERS" \
+    batch_size="$BATCH_SIZE" \
+    eval_batch_size="$EVAL_BATCH_SIZE" \
     gw_regularization.enabled=true \
     gw_regularization.variant="$VAR" \
     gw_regularization.lambda_gw="$LAMBDA"
