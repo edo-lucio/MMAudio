@@ -1,59 +1,99 @@
 #!/bin/bash
 #SBATCH --job-name=mma_eval
-#SBATCH --output=logs/eval_%A_%a.out
-#SBATCH --error=logs/eval_%A_%a.err
+#SBATCH --output=logs/eval_%j.out
+#SBATCH --error=logs/eval_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
-#SBATCH --time=06:00:00
+#SBATCH --mem=32G
+#SBATCH --time=12:00:00
 #SBATCH --partition=acltr
 #SBATCH --gres=gpu:1
 #SBATCH --mail-user=edlu@itu.dk
 #SBATCH --mail-type=FAIL
 
-# Batch evaluation on VGGSound test set.
+# Post-training evaluation on the VGGSound test set.
 #
-# Usage:
-#   sbatch --export=ALL,EXP_ID=gw_baseline                 jobs/eval.job
-#   sbatch --export=ALL,EXP_ID=gw_var_projected,EMA=true   jobs/eval.job
+# Pipeline:
+#   1. Synthesize <exp_id>_ema_final.pth from EMA buffers if not on disk.
+#   2. Generate audio for the full test set with sample().
+#   3. Run av_bench.extract + evaluate to compute FAD-PaSST / IS / CLAP-FAD /
+#      IB-score / DeSync.
+#   4. Save metrics to output/<exp_id>/test-output_metrics.json.
 #
-# Generates audio for the test set and computes FD_PaSST / IS / IB-score
-# / DeSync via av-benchmark. Requires ../data/eval-cache/vggsound-test to
-# be present (download from huggingface.co/datasets/hkchengrex/MMAudio-precomputed-results).
+# Submit:
+#   sbatch --export=ALL,EXP_ID=gw_baseline                    jobs/eval.job
+#   sbatch --export=ALL,EXP_ID=gw_var_global,BATCH_SIZE=64    jobs/eval.job
+#
+# Required: ../data/eval-cache/vggsound-test (GT feature cache, download from
+# huggingface.co/datasets/hkchengrex/MMAudio-precomputed-results).
+#
+# Auto-skip: if test-output_metrics.json already exists, the run is skipped
+# unless FORCE=1 is set.
 
+set -e
+set -x
+
+# --- 1. Environment & Path Definitions ---
 PROJECT_DIR="$HOME/MMA/MMAudio"
 ENV_PATH="/home/edlu/miniconda3-25-5-1-1/envs/gwot"
-source "$PROJECT_DIR/jobs/_header.sh"
+CONDA_BIN="/opt/itu/easybuild/software/Miniconda3/25.5.1-1/bin/conda"
 
-: "${EXP_ID:?set EXP_ID=<run_id> via --export=ALL,EXP_ID=...}"
+# --- 2. Load System Modules ---
+module load CUDA/12.1.1
+module load NCCL/2.18.3-GCCcore-12.3.0-CUDA-12.1.1
+module load Miniconda3/25.5.1-1
+source /opt/itu/easybuild/software/Miniconda3/25.5.1-1/etc/profile.d/conda.sh
+conda activate "$ENV_PATH"
+cd "$PROJECT_DIR"
+
+# --- 3. Avoid `import torch` hang on shared FS ---
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+echo "Pre-warming torch import cache..."
+time python -c "import torch; print('torch', torch.__version__)"
+echo "Cache warm."
+
+mkdir -p logs
+
+# --- 4. Required inputs ---
+: "${EXP_ID:?set EXP_ID via --export=ALL,EXP_ID=<run_id>}"
+
 MODEL="${MODEL:-small_16k}"
-DURATION="${DURATION:-8}"
-DATASET="${DATASET:-vggsound}"
+DURATION="${DURATION:-8.0}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
-GPUS="${GPUS:-1}"
-EMA="${EMA:-true}"
+FORCE="${FORCE:-0}"
+COMPILE="${COMPILE:-False}"   # default False because sm_75 GPUs can't JIT bf16 kernels
 
-# EMA=true  -> use <exp_id>_ema_final.pth
-# EMA=false -> use <exp_id>_last.pth (raw weights)
-if [ "$EMA" = "true" ]; then
-    WEIGHTS="output/${EXP_ID}/${EXP_ID}_ema_final.pth"
-else
-    WEIGHTS="output/${EXP_ID}/${EXP_ID}_last.pth"
+# --- 5. Skip if already evaluated ---
+METRICS_JSON="output/${EXP_ID}/test-output_metrics.json"
+if [ -f "$METRICS_JSON" ] && [ "$FORCE" != "1" ]; then
+    echo "Already evaluated: $METRICS_JSON"
+    echo "Re-run with FORCE=1 to overwrite."
+    cat "$METRICS_JSON"
+    exit 0
 fi
 
-if [ ! -f "$WEIGHTS" ]; then
-    echo "Checkpoint not found: $WEIGHTS"
-    echo "If training is done, run EMA synthesis first (see Runner docs)."
+# --- 6. Verify the run dir + at least one EMA buffer exist ---
+if [ ! -d "output/${EXP_ID}" ]; then
+    echo "ERROR: output/${EXP_ID}/ doesn't exist — wrong EXP_ID?"
+    exit 2
+fi
+if [ ! -f "output/${EXP_ID}/${EXP_ID}_ema_final.pth" ] && \
+   [ -z "$(ls -A output/${EXP_ID}/ema_ckpts 2>/dev/null)" ]; then
+    echo "ERROR: neither <exp_id>_ema_final.pth nor any ema_ckpts/* exist for ${EXP_ID}"
+    echo "       Train must reach at least ema.checkpoint_every (5000) iters before eval."
     exit 2
 fi
 
-mkdir -p logs "output/${EXP_ID}/eval"
-
-torchrun --standalone --nproc_per_node="$GPUS" batch_eval.py \
-    duration_s="$DURATION" \
-    dataset="$DATASET" \
-    model="$MODEL" \
-    num_workers="$NUM_WORKERS" \
+# --- 7. Run ---
+OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=1 eval_run.py \
     exp_id="$EXP_ID" \
-    weights="$WEIGHTS"
+    model="$MODEL" \
+    duration_s="$DURATION" \
+    batch_size="$BATCH_SIZE" \
+    num_workers="$NUM_WORKERS" \
+    compile="$COMPILE"
+
+echo "Done. Metrics:"
+cat "$METRICS_JSON"

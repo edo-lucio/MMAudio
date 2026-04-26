@@ -5,52 +5,99 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
-#SBATCH --time=06:00:00
+#SBATCH --mem=32G
+#SBATCH --time=12:00:00
 #SBATCH --partition=acltr
 #SBATCH --gres=gpu:1
-#SBATCH --array=0-%A_IDX%
 #SBATCH --mail-user=edlu@itu.dk
 #SBATCH --mail-type=FAIL,ARRAY_TASKS
 
-# Array eval: one task per finished run under output/.
-# Before sbatch, set the array range to match the number of runs:
-#   N=$(ls -d output/gw_* | wc -l); sbatch --array=0-$((N-1)) jobs/eval_all.job
+# Array eval: one task per directory under output/ that matches output/gw_*
+# (or PATTERN). Each task does a full post-training eval (synthesize EMA +
+# generate test audio + compute metrics) and writes
+# output/<exp_id>/test-output_metrics.json.
+#
+# Submit:
+#   N=$(ls -d output/gw_* 2>/dev/null | wc -l)
+#   sbatch --array=0-$((N-1)) jobs/eval_all.job
+#
+# Or for a custom pattern:
+#   PATTERN='output/gw_var_*' N=$(ls -d $PATTERN | wc -l)
+#   sbatch --array=0-$((N-1)) --export=ALL,PATTERN="$PATTERN" jobs/eval_all.job
+#
+# Auto-skip: if test-output_metrics.json already exists for a run, the array
+# task short-circuits unless FORCE=1.
 
+set -e
+set -x
+
+# --- 1. Environment & Path Definitions ---
 PROJECT_DIR="$HOME/MMA/MMAudio"
 ENV_PATH="/home/edlu/miniconda3-25-5-1-1/envs/gwot"
-source "$PROJECT_DIR/jobs/_header.sh"
+CONDA_BIN="/opt/itu/easybuild/software/Miniconda3/25.5.1-1/bin/conda"
 
+# --- 2. Load System Modules ---
+module load CUDA/12.1.1
+module load NCCL/2.18.3-GCCcore-12.3.0-CUDA-12.1.1
+module load Miniconda3/25.5.1-1
+source /opt/itu/easybuild/software/Miniconda3/25.5.1-1/etc/profile.d/conda.sh
+conda activate "$ENV_PATH"
+cd "$PROJECT_DIR"
+
+# --- 3. Avoid `import torch` hang on shared FS ---
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+echo "Pre-warming torch import cache..."
+time python -c "import torch; print('torch', torch.__version__)"
+echo "Cache warm."
+
+mkdir -p logs
+
+# --- 4. Knobs (override via --export) ---
+PATTERN="${PATTERN:-output/gw_*}"
 MODEL="${MODEL:-small_16k}"
-DURATION="${DURATION:-8}"
-DATASET="${DATASET:-vggsound}"
+DURATION="${DURATION:-8.0}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
+FORCE="${FORCE:-0}"
+COMPILE="${COMPILE:-False}"
 
-# Discover run dirs (skip ones without an ema_final checkpoint)
-mapfile -t RUNS < <(ls -1d output/gw_* 2>/dev/null | xargs -n1 basename)
+# --- 5. Discover runs and pick the one for this array index ---
+mapfile -t RUNS < <(ls -1d $PATTERN 2>/dev/null | xargs -n1 basename | sort)
 N=${#RUNS[@]}
 if [ "$N" -eq 0 ]; then
-    echo "No runs in output/gw_*"; exit 2
+    echo "ERROR: no runs match $PATTERN — submit training jobs first"
+    exit 2
 fi
 if [ "$SLURM_ARRAY_TASK_ID" -ge "$N" ]; then
-    echo "Array index $SLURM_ARRAY_TASK_ID >= $N runs"; exit 0
+    echo "Array index $SLURM_ARRAY_TASK_ID >= $N runs — nothing to do."
+    exit 0
 fi
 
 EXP_ID="${RUNS[$SLURM_ARRAY_TASK_ID]}"
-WEIGHTS="output/${EXP_ID}/${EXP_ID}_ema_final.pth"
+echo "=== Evaluating $EXP_ID  (array $SLURM_ARRAY_TASK_ID / $((N - 1))) ==="
 
-echo "Evaluating $EXP_ID (array $SLURM_ARRAY_TASK_ID / $N)"
-
-if [ ! -f "$WEIGHTS" ]; then
-    echo "Missing $WEIGHTS — skipping"; exit 0
+METRICS_JSON="output/${EXP_ID}/test-output_metrics.json"
+if [ -f "$METRICS_JSON" ] && [ "$FORCE" != "1" ]; then
+    echo "Already evaluated: $METRICS_JSON  (set FORCE=1 to redo)"
+    cat "$METRICS_JSON"
+    exit 0
 fi
 
-mkdir -p logs "output/${EXP_ID}/eval"
+# Verify there's something to evaluate (final EMA OR at least one EMA buffer)
+if [ ! -f "output/${EXP_ID}/${EXP_ID}_ema_final.pth" ] && \
+   [ -z "$(ls -A output/${EXP_ID}/ema_ckpts 2>/dev/null)" ]; then
+    echo "Skipping ${EXP_ID}: no EMA buffers (training didn't reach ema.checkpoint_every iters)"
+    exit 0
+fi
 
-torchrun --standalone --nproc_per_node=1 batch_eval.py \
-    duration_s="$DURATION" \
-    dataset="$DATASET" \
-    model="$MODEL" \
-    num_workers="$NUM_WORKERS" \
+# --- 6. Run eval ---
+OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=1 eval_run.py \
     exp_id="$EXP_ID" \
-    weights="$WEIGHTS"
+    model="$MODEL" \
+    duration_s="$DURATION" \
+    batch_size="$BATCH_SIZE" \
+    num_workers="$NUM_WORKERS" \
+    compile="$COMPILE"
+
+echo "Done. Metrics for ${EXP_ID}:"
+cat "$METRICS_JSON"

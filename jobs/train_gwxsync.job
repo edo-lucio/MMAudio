@@ -71,6 +71,6 @@ OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=2 train.py \
     gw_regularization.enabled="$G" \
     gw_regularization.variant="$VAR" \
     gw_regularization.lambda_gw="$LAMBDA" \
-    disable_sync="$DISABLE_SYNC"
+    +disable_sync="$DISABLE_SYNC"
 
 echo "Done: gw_${G}_sync_${S}"
