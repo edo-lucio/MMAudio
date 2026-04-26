@@ -1,0 +1,55 @@
+\documentclass[11pt]{article}
+
+% --- Standard preamble -----------------------------------------------------
+\usepackage[a4paper, margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[round, authoryear]{natbib}
+\usepackage[colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue]{hyperref}
+
+% Figures live in paper/figures/ (create as needed).
+\graphicspath{{figures/}}
+
+% --- Math macros (define here, never inline in sections) -------------------
+% Add custom commands as the thesis grows. Examples:
+% \newcommand{\R}{\mathbb{R}}
+% \newcommand{\E}{\mathbb{E}}
+
+% --- Math macros for this thesis -------------------------------------------
+\newcommand{\LFM}{\mathcal{L}_{\mathrm{FM}}}
+\newcommand{\LGW}{\mathcal{L}_{\mathrm{GW}}}
+\newcommand{\LFGW}{\mathcal{L}_{\mathrm{FGW}}}
+\newcommand{\DV}{D_{\mathrm{V}}}
+\newcommand{\DA}{D_{\mathrm{A}}}
+\newcommand{\Tstar}{T^{\star}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+
+% --- Title -----------------------------------------------------------------
+\title{Relational Alignment for Video-to-Audio Generation:\\
+       A Gromov--Wasserstein Regularizer for Flow-Matching}
+\author{Edoardo Samuele Lucini\\IT University of Copenhagen}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+TODO: 150--250 word abstract once results are in.
+\end{abstract}
+
+% --- Sections (each lives in paper/sections/<name>.tex) --------------------
+\input{sections/introduction}
+\input{sections/related_work}
+\input{sections/methodology}
+\input{sections/results}
+\input{sections/discussion}
+
+% --- Bibliography ----------------------------------------------------------
+\bibliographystyle{plainnat}
+\bibliography{../literature/refs}
+
+\end{document}

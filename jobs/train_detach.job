@@ -53,6 +53,7 @@ ITERS="${ITERS:-300000}"
 LAMBDA="${LAMBDA:-0.01}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE}}"
+COMPILE="${COMPILE:-False}"   # default False because sm_75 (Tesla T4) can't JIT bf16 kernels
 
 OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=2 train.py \
     exp_id="gw_detach_${D}" \
@@ -60,6 +61,7 @@ OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=2 train.py \
     num_iterations="$ITERS" \
     batch_size="$BATCH_SIZE" \
     eval_batch_size="$EVAL_BATCH_SIZE" \
+    compile="$COMPILE" \
     gw_regularization.enabled=true \
     gw_regularization.variant="$VAR" \
     gw_regularization.lambda_gw="$LAMBDA" \

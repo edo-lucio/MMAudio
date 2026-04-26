@@ -54,12 +54,14 @@ ITERS="${ITERS:-300000}"
 LAMBDA="${LAMBDA:-0.01}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE}}"
+COMPILE="${COMPILE:-False}"   # default False because sm_75 (Tesla T4) can't JIT bf16 kernels
 
 COMMON=(
     data.VGGSound.subset_name=sets/vgg3-train-ood.tsv
     data.ExtractedVGG.tsv=../data/v1-16-memmap/vgg-train-ood.tsv
     batch_size="$BATCH_SIZE"
     eval_batch_size="$EVAL_BATCH_SIZE"
+    compile="$COMPILE"
 )
 
 case "$SLURM_ARRAY_TASK_ID" in

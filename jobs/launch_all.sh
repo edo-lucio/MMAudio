@@ -31,8 +31,9 @@ LAMBDA="${LAMBDA:-0.01}"
 BEST_VARIANT="${BEST_VARIANT:-global}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE}}"
+COMPILE="${COMPILE:-False}"   # default False because sm_75 GPUs can't JIT bf16 kernels; flip to True if you secure Ampere+
 
-EXPORT="ALL,ITERS=${ITERS},MODEL=${MODEL},LAMBDA=${LAMBDA},BEST_VARIANT=${BEST_VARIANT},BATCH_SIZE=${BATCH_SIZE},EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE}"
+EXPORT="ALL,ITERS=${ITERS},MODEL=${MODEL},LAMBDA=${LAMBDA},BEST_VARIANT=${BEST_VARIANT},BATCH_SIZE=${BATCH_SIZE},EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE},COMPILE=${COMPILE}"
 
 echo "== GW experiment launcher =="
 echo "phase           = $PHASE"
@@ -42,6 +43,7 @@ echo "LAMBDA          = $LAMBDA"
 echo "BEST_VARIANT    = $BEST_VARIANT"
 echo "BATCH_SIZE      = $BATCH_SIZE"
 echo "EVAL_BATCH_SIZE = $EVAL_BATCH_SIZE"
+echo "COMPILE         = $COMPILE"
 echo "----------------------------"
 
 submit() {

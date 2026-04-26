@@ -1,142 +1,146 @@
-# CLAUDE.md
+# Thesis Orchestrator
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file is the brain of an agentic thesis-writing system. Sub-agents use it
+to know who they are, what they share, and how their outputs combine into a
+single LaTeX document.
 
-## Repo purpose
+---
 
-Research fork of **MMAudio** (CVPR 2025, Cheng et al.) that adds a **Gromov-Wasserstein (GW) regularizer** to the flow-matching V2A training objective. The fork doubles as the codebase and the thesis write-up:
+## Project Overview
 
-- `train.py`, `mmaudio/`, `config/`, `experiments/`, `jobs/` — training, eval, and cluster scripts.
-- `thesis/` — LaTeX thesis (chapters, figures, `refs.bib`).
-- `SETUP.md` is the authoritative end-to-end setup/experiment guide; prefer it over re-deriving install or data-prep steps.
+- **Title**: *Relational Alignment for Video-to-Audio Generation: A Gromov--Wasserstein Regularizer for Flow-Matching*
+- **Research question**: *Can a Gromov--Wasserstein regularizer that aligns the relational geometry of video and audio embeddings improve flow-matching video-to-audio generation, beyond what pointwise conditioning (cross-attention, adaLN, contrastive losses) already achieves?*
+- **Method**: Add a Gromov--Wasserstein (GW) penalty between intra-video and intra-audio pairwise distance matrices to MMAudio's flow-matching V2A objective, solved via entropic Sinkhorn relaxation in fp32, with four representation variants (`global` / `projected` / `c_g` / `fused`) and a `lambda_gw` schedule.
+- **Dataset(s)**: VGGSound (Chen et al. 2020). Source manifests: 180,067 train / 2,049 val / 15,222 test clips. Currently extracted on the cluster: 202 train / 10 val / 19 test (subset cap; expansion via `down.py` + `jobs/extract_features.job`).
+- **Author**: Edoardo Samuele Lucini
+- **Advisor / Institution**: IT University of Copenhagen
 
-## Code architecture (big picture)
+---
 
-The training pipeline is a Hydra-configured DDP flow-matching trainer that **never extracts features at step time** — CLIP, Synchformer, and VAE latents are all precomputed into memmapped TensorDicts. This is the most important fact about the repo: the hot training loop only does flow-matching (+ optional GW) on cached tensors.
+## Codebase Map
 
-Call graph:
+This project keeps its existing repo layout. Sub-agents read **directly from
+the repo root**, not from a `src/` directory. The Code Interpreter should
+treat the following as its inputs (everything else under the repo root —
+`output/`, `logs/`, `data/`, `ext_weights/`, `thesis/` — is generated, large,
+or written by other agents and should not be mined for "method" content).
+
+| Area | Paths | What lives here |
+|---|---|---|
+| Training entry point | `train.py` | Hydra entry, DDP setup, training loop |
+| Core model + losses | `mmaudio/` | DiT, flow-matching, GW regularizer, runner |
+| GW regularization | `mmaudio/model/gw_regularization.py` | `compute_gw_regularization`, `entropic_gw_loss`, `fused_gw_loss`, `lambda_schedule` |
+| Configs | `config/` | Hydra YAMLs (`base_config.yaml`, `train_config.yaml`, `eval_config.yaml`, `data/base.yaml`) |
+| Feature extraction | `training/extract_video_training_latents.py`, `training/extract_audio_training_latents.py`, `training/partition_clips.py` | Precompute CLIP / Synchformer / VAE-latent TensorDicts |
+| Experiment scripts | `experiments/` | `analysis.py`, `analyze_couplings.py`, `diagnose_geometry.py`, `make_ood_split.py`, `run_gw_experiments.sh` |
+| SLURM jobs | `jobs/` | `train_*.job`, `eval*.job`, `extract_features.job`, `download_vggsound.job`, `launch_all.sh` |
+| Data download | `down.py` | yt-dlp + ffmpeg pipeline for VGGSound subset |
+| Eval driver | `batch_eval.py`, `demo.py` | Post-training evaluation on VGGSound test set |
+
+**Inline references the Literature Researcher should chase**: comments in
+`mmaudio/model/gw_regularization.py` cite Peyré et al. 2016; `mmaudio/model/flow_matching.py`
+cites Lipman et al. 2023; `mmaudio/runner.py` references the MMAudio paper
+(Cheng et al. 2025).
+
+---
+
+## Agent Roles
+
+Each role is implemented as a slash command in `.claude/commands/`. Agents are
+spawned via the `Task` tool from the `/research` orchestrator. They never call
+each other directly — coordination flows through `knowledge_base/findings.md`.
+
+| Role | Slash command | Reads | Writes |
+|---|---|---|---|
+| **Code Interpreter** | `/interpret_code <topic>` | repo paths from the **Codebase Map** above | `[CODE_FINDINGS]` |
+| **Literature Researcher** | `/search_literature <topic>` | MCP tools (consensus, scholar-gateway) | `[LIT_FINDINGS]`, `literature/refs.bib`, `literature/summaries/<key>.md` |
+| **Writer** | `/write_section <topic>` | `[CODE_FINDINGS]`, `[LIT_FINDINGS]` | `paper/sections/<name>.tex`, `[DRAFT]` |
+| **Reviewer** | `/review_section <topic>` | `[DRAFT]`, `[LIT_FINDINGS]`, latest `.tex` | `[REVIEW_NOTES]`, edits `.tex` in place |
+
+Concretely:
+
+- **Code Interpreter** scans the **Codebase Map** paths, extracts methods, algorithms, hyperparameters, metrics, and inline paper references. Cites every finding as `path/to/file.py:line` (real repo path — *not* `src/...`).
+- **Literature Researcher** searches Consensus + Scholar Gateway MCPs (≥3 consensus queries + ≥1 scholar-gateway query per topic), adds BibTeX entries, and writes per-paper summaries.
+- **Writer** translates the Code Interpreter's methodologies, experiments, and architectures into LaTeX, contextualising and comparing them against the Literature Researcher's findings. Every methodological claim ties back to a `path:line`; every external assertion is cited.
+- **Reviewer** validates every claim in the draft against literature and code. Severity tags: `[CRITICAL]` (fixed directly in `.tex`), `[MINOR]` (noted, not fixed), `[SUGGESTION]` (noted).
+
+---
+
+## Shared State
+
+Single source of truth: **`knowledge_base/findings.md`**. Use markdown headings
+to delimit sections. Agents append (don't overwrite) within their section.
+
+Tagged sections (always present, in this order):
 
 ```
-train.py  (Hydra entry; distributed_setup; seeds; dataset + loader plumbing)
-  └─ mmaudio/runner.py :: Runner
-        ├─ mmaudio/model/networks.py :: get_my_mmaudio     # DiT; DDP-wrapped
-        ├─ mmaudio/model/flow_matching.py :: FlowMatching  # LFM loss + Euler sampler
-        ├─ mmaudio/model/gw_regularization.py              # LGW / LFGW (see below)
-        └─ nitrous_ema.PostHocEMA                          # post-hoc EMA buffers
+## [CODE_FINDINGS]
+## [LIT_FINDINGS]
+## [DRAFT]
+## [REVIEW_NOTES]
 ```
 
-`Runner.train_pass` is where GW is injected: `train_fn` (compiled) returns the FM loss + features; GW is computed **after** in fp32 over the `video_exist=True` subset, then added with `lambda_schedule`. `train_fn` and `val_fn` are compiled **separately** on purpose — merging them destroys performance. `torch.compile` is on by default (`compile=False` to disable when debugging).
+Conventions:
 
-GW variants in `mmaudio/model/gw_regularization.py::compute_gw_regularization`:
-- `global` — pairwise dists on raw CLIP avg-pool vs normalized `a_mean` avg-pool
-- `projected` — same but after `clip_input_proj` / `audio_input_proj`
-- `c_g` — uses the video contribution to the global conditioning `c_g`
-- `fused` — FGW with a cosine cross-domain cost
+- Every entry begins with a `### YYYY-MM-DD HH:MM — <topic>` subheading.
+- Code findings cite `path/to/file.py:line_number` using the **real repo path** (no `src/` prefix).
+- Literature findings cite the BibTeX key the agent added to `refs.bib`.
+- Drafts include the target `.tex` filename in the subheading.
+- Review notes include severity tags: `[CRITICAL]`, `[MINOR]`, `[SUGGESTION]`.
 
-Data flow: `mmaudio/data/extracted_vgg.py` + `extracted_audio.py` are memmap-backed datasets; `mm_dataset.py` mixes them. Extraction scripts live in `training/` (video: `extract_video_training_latents.py`, audio: `extract_audio_training_latents.py`).
+---
 
-External encoders/decoders live under `mmaudio/ext/` (autoencoder/VAE, BigVGAN vocoder, Synchformer). Their weights are loaded from `ext_weights/` — see `config/base_config.yaml` for the paths.
+## MCP Tools
 
-## Configuration (Hydra)
+The Literature Researcher uses these. If unavailable in your Claude Code
+session, run `/mcp` to install them.
 
-Config composes `config/base_config.yaml` ← `config/train_config.yaml` (with `data: base` from `config/data/base.yaml`). Override anything on the CLI:
+| MCP | Purpose | When to use |
+|---|---|---|
+| `consensus` | Aggregated peer-reviewed findings | "What does research say about X?" |
+| `scholar-gateway` | Semantic search + citation retrieval | Free-text exploration, finding seed papers |
 
-```bash
-torchrun --standalone --nproc_per_node=N train.py \
-    exp_id=my_run \
-    model=small_16k \
-    gw_regularization.enabled=true \
-    gw_regularization.variant=global \
-    gw_regularization.lambda_gw=0.01 \
-    batch_size=64 compile=False
-```
+The agent must run **at least 3** consensus queries from different angles and
+**at least one** scholar-gateway query per topic.
 
-- `exp_id` is the single knob that controls the run directory (`./output/${exp_id}`) and **auto-resume**: re-running with the same `exp_id` picks up `<exp_id>_ckpt_last.pth`. Change `exp_id` to start fresh.
-- `model` must end with `16k` or `44k` (routes to `CONFIG_16K` / `CONFIG_44K` in `mmaudio/model/sequence_config.py`).
-- `_v2` networks (e.g. `mmaudio_large_44k_v2.pth`) are **inference-only** — they cannot be trained with this script.
+---
 
-## Common commands
+## LaTeX Conventions
 
-All training/eval commands assume you've run `pip install -e .` and have `ext_weights/` + precomputed memmaps in place. See `SETUP.md` for the slow one-time data prep; the commands below are the ones you run repeatedly.
+- Section files live in `paper/sections/<name>.tex` and are `\input{}`-ed by `paper/main.tex`.
+- Citations: `\citep{key}` (parenthetical) and `\citet{key}` (inline as a noun).
+- Every key used in `\cite*{}` must exist in `literature/refs.bib`. The Reviewer agent enforces this.
+- Math macros are defined in the `paper/main.tex` preamble. Currently available: `\LFM, \LGW, \LFGW, \DV, \DA, \Tstar, \R, \E`. Always use these; never redefine inline.
+- Figures: `\includegraphics{figures/name}` (place files in `paper/figures/`, create as needed).
+- Build artefacts go to `paper/out/` (configured via `.vscode/settings.json`).
 
-```bash
-# Smoke test (1 GPU, no learning, just confirms the pipeline runs):
-OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=1 train.py \
-    exp_id=debug compile=False debug=True example_train=True batch_size=1
+---
 
-# Baseline training (GW off), 2 GPUs:
-OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=2 train.py \
-    exp_id=baseline_small_16k model=small_16k
+## Current Status
 
-# Full GW experiment sweep driver (baseline, variants, lambda, detach, schedule, ood, gwxsync, all):
-GPUS=8 ITERS=300000 MODEL=small_16k bash experiments/run_gw_experiments.sh <group>
+- [x] CLAUDE.md filled in (title / question / method / dataset)
+- [ ] At least one `/research <topic>` cycle has run end-to-end
+- [ ] `paper/sections/introduction.tex` populated
+- [ ] `paper/sections/related_work.tex` populated
+- [ ] `paper/sections/methodology.tex` populated
+- [ ] `paper/sections/results.tex` populated
+- [ ] `paper/sections/discussion.tex` populated
+- [ ] `literature/refs.bib` ≥ 20 entries
+- [ ] All `[CRITICAL]` review notes resolved
 
-# Feature extraction (edit the constants at the top of the script first):
-torchrun --standalone --nproc_per_node=N training/extract_video_training_latents.py
-python  training/partition_clips.py
-torchrun --standalone --nproc_per_node=N training/extract_audio_training_latents.py
+---
 
-# Batch eval (FD / IS / IB / DeSync) on a trained checkpoint:
-OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=4 batch_eval.py \
-    duration_s=8 dataset=vggsound model=small_16k num_workers=8 \
-    weights=output/<exp_id>/<exp_id>_ema_final.pth
+## Workflow
 
-# Demo (text + optional video):
-python demo.py --duration=8 --video=<path> --prompt "..."
-```
+User runs `/research "<topic prompt>"`. The orchestrator:
 
-### Checkpoint flavors
+1. **Spawns in parallel**:
+   - `interpret_code` subagent → writes `[CODE_FINDINGS]`
+   - `search_literature` subagent → writes `[LIT_FINDINGS]` + adds entries to `refs.bib`
+2. **Waits** for both to complete.
+3. **Spawns** `write_section` → drafts `paper/sections/<name>.tex` and appends `[DRAFT]`.
+4. **Spawns** `review_section` → validates citations and code grounding, appends `[REVIEW_NOTES]`, edits the `.tex` directly to fix `[CRITICAL]` issues.
+5. **Reports** a one-paragraph summary of agent outputs to the user.
 
-Produced in `output/<exp_id>/`:
-- `<exp_id>_last.pth` — weights only.
-- `<exp_id>_ckpt_last.pth` — weights + optimizer + scheduler + EMA (used for resuming).
-- `<exp_id>_ema_final.pth` — synthesized **post-training** from EMA buffers via `mmaudio/utils/synthesize_ema.py`. Use this for eval/demo.
-
-### GW analysis scripts (`experiments/`)
-
-- `analyze_couplings.py` — inspect learned T\*; requires the run was launched with `gw_regularization.save_couplings=true`.
-- `analysis.py curves --runs output/gw_*` — compare training curves across the sweep.
-- `diagnose_geometry.py` — pairwise-distance diagnostics.
-- `make_ood_split.py` — produces `sets/vgg3-{train,test}-ood.tsv` for the OOD group.
-
-## Cluster / SLURM workflow
-
-**Always** use the templates in `jobs/` for SLURM submissions — they encode non-obvious cluster constraints:
-
-- `jobs/_header.sh` and `jobs/_common.sh` load CUDA/NCCL/Miniconda modules, activate the env, `cd` to the repo, cap thread pools, and alias `sets/vgg-*.tsv` → `sets/vgg3-*.tsv`. Source `_header.sh` from every job after the `#SBATCH` block.
-- **RLIMIT_NPROC on this cluster is ~12.** `_common.sh` therefore pins `OMP_NUM_THREADS=4`, `OPENBLAS_NUM_THREADS=2`, `MKL_NUM_THREADS=2`, `NUMEXPR_NUM_THREADS=2`, `VECLIB_MAXIMUM_THREADS=2`. Keep `#SBATCH --cpus-per-task` ≤ ~12 and `num_workers × GPUs` within that budget, or BLAS will either crash or silently hang during `import torch` (symptom: empty stdout, because Python never finishes importing).
-- Config mentions `sets/vgg3-*.tsv` but the repo ships `sets/vgg-*.tsv` — `_common.sh` copies them on first run. Don't delete the copies.
-
-Existing job scripts (`train_baseline.job`, `train_variants.job`, `train_lambda.job`, `train_detach.job`, `train_schedule.job`, `train_ood.job`, `train_gwxsync.job`, `eval.job`, `eval_all.job`, `extract_features.job`, `analysis.job`, `diagnose_geometry.job`) are the canonical entry points — prefer parameterizing them (`EXP_ID=… MODEL=… ITERS=… GPUS=… sbatch ...`) over writing new ones.
-
-## Gotchas
-
-These bite on long runs. In priority order:
-
-- **Sinkhorn is fp32-only.** `compute_gw_regularization` casts explicitly; bf16 produces NaNs. Don't "optimize" this.
-- **`GradScaler` is disabled** (`enable_grad_scaler: False`). This is deliberate (Feb 2025 stability fix, see README changelog), not an oversight.
-- **In-place mutations in the model:** `MMAudio.normalize` / `unnormalize` and `a_mean.sub_().div_()` modify their inputs. `clip_f` is also mutated in-place inside `train_fn` for CFG null-masking. `runner.py::train_pass` clones before calling the GW regularizer — preserve that if you edit it.
-- **Validation RNG:** `eval_rng_clone` is used so val/eval is reproducible across runs. Don't draw from `trainer.rng` inside val/eval without snapshotting.
-- **Same `exp_id` = resume**, not overwrite. Change `exp_id` (or delete `output/<exp_id>/<exp_id>_ckpt_last.pth`) to start over.
-- **`num_workers` is per-GPU**, multiplied by `--nproc_per_node`. Easy to exceed the nproc budget.
-
-## Thesis conventions
-
-- Class: `article`, 11pt, `natbib` with `(round, authoryear)`.
-- Math macros (defined in `thesis/thesis.tex` preamble): `\LFM, \LGW, \LFGW, \DV, \DA, \Tstar, \R, \E`. Always use them; never redefine or inline.
-- Figures: `\includegraphics{figures/name}`; tables use `booktabs`.
-- Bibliography: `thesis/refs.bib` — ~40 entries covering OT foundations, flow matching, V2A, audio-visual alignment, multimodal backbones. Add new keys there; don't duplicate them into this file.
-
-### Chapter map (`thesis/chapters/`)
-
-- `intro.tex` — motivation, pointwise vs relational gap, contributions.
-- `background.tex` — flow matching, GW/FGW, existing V2A models (MMAudio, Synchformer).
-- `method.tex` — formalization, FGW, training objective.
-- `design.tex` — D1–D5 design axes and justifications.
-- `experiments.tex` — H1–H5 hypotheses, ablation grid, metrics.
-- `results.tex` — filled in after experiments run.
-- `conclusion.tex` — scope/limitations, expected contributions.
-
-### Thesis argument (one paragraph)
-
-Pointwise objectives (contrastive, attention, adaLN) align instances but not relational geometry. We add a GW penalty between intra-video and intra-audio pairwise distance matrices, solved via entropic relaxation + Sinkhorn. Tested across 5 design axes (D1–D5) against FAD / PaSST / ImageBind / DeSync metrics.
+Individual agents can also be invoked directly (`/interpret_code`,
+`/search_literature`, `/write_section`, `/review_section`) for surgical work.
