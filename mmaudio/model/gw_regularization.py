@@ -59,7 +59,10 @@ def entropic_gw_loss(
 
     for _ in range(num_iter):
         G = -2.0 * (D_video @ T @ D_audio)
-        K = torch.exp(-G / epsilon)  # (B, B)
+        # log-domain shift for numerical stability: exp(x - max(x)) keeps K in [0,1].
+        # The shift cancels in the u/v Sinkhorn iterations.
+        logK = -G / epsilon
+        K = torch.exp(logK - logK.max())  # (B, B)
         # Sinkhorn projection
         u = torch.ones(B, device=device, dtype=dtype)
         v = torch.ones(B, device=device, dtype=dtype)
@@ -210,6 +213,9 @@ def compute_gw_regularization(
                 num_iter=num_sinkhorn_iter,
                 epsilon=epsilon,
             )
+
+        if not torch.isfinite(loss):
+            return zero, None
     return loss, T
 
 
