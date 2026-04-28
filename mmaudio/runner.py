@@ -11,7 +11,19 @@ import torch.distributed
 import torch.optim as optim
 from av_bench.evaluate import evaluate
 from av_bench.extract import extract
+from av_bench.synchformer.hf_src.modeling_ast import ASTModel as _AVBenchASTModel
 from nitrous_ema import PostHocEMA
+
+# Patch: av_bench's vendored ASTModel calls self.get_head_mask but doesn't
+# inherit from transformers.PreTrainedModel/ModuleUtilsMixin where it lives.
+# av_bench only ever passes head_mask=None, so the no-op fallback suffices.
+if not hasattr(_AVBenchASTModel, 'get_head_mask'):
+    def _ast_get_head_mask(self, head_mask, num_hidden_layers, is_attention_chunked=False):
+        if head_mask is None:
+            return [None] * num_hidden_layers
+        raise NotImplementedError(
+            'av_bench ASTModel patch: non-None head_mask not supported')
+    _AVBenchASTModel.get_head_mask = _ast_get_head_mask
 from omegaconf import DictConfig
 from torch.nn.parallel import DistributedDataParallel as DDP
 

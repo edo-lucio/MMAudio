@@ -18,6 +18,7 @@ debug: False
 cudnn_benchmark: True
 compile: True
 amp: True
+enable_grad_scaler: False
 weights: null
 checkpoint: null
 seed: 14159265
