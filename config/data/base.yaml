@@ -28,14 +28,14 @@ ExtractedVGG:
 
 ExtractedVGG_test:
   tag: test
-  gt_cache: ../data/eval-cache/vggsound-test
+  gt_cache: ./data/eval-cache/vggsound-test-eval-cache
   output_subdir: null
   tsv: ./training/example_output/memmap/vgg-test.tsv
   memmap_dir: ./training/example_output/memmap/vgg-test
 
 ExtractedVGG_val:
   tag: val
-  gt_cache: ../data/eval-cache/vggsound-val
+  gt_cache: ./data/eval-cache/vggsound-test-eval-cache
   output_subdir: val
   tsv: ./training/example_output/memmap/vgg-val.tsv
   memmap_dir: ./training/example_output/memmap/vgg-val

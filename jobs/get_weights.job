@@ -1,0 +1,65 @@
+#!/bin/bash
+#SBATCH --job-name=MMAudio_Setup
+#SBATCH --output=logs/setup_%j.out
+#SBATCH --error=logs/setup_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=07:30:00
+#SBATCH --partition=scavenge
+
+set -e
+mkdir -p logs
+
+# ── av_bench weights ──────────────────────────────────────────────────────────
+SITE_PACKAGES=/home/edlu/miniconda3-25-5-1-1/envs/gwot/lib/python3.10/site-packages
+HF_TOKEN=.
+
+cd "$SITE_PACKAGES"
+mkdir -p weights
+cd weights
+
+# CLAP checkpoint
+wget -nc https://huggingface.co/lukewys/laion_clap/resolve/main/music_speech_audioset_epoch_15_esc_89.98.pt
+ls -la music_speech_audioset_epoch_15_esc_89.98.pt
+
+# SyncFormer checkpoint (required by av_bench eval)
+wget -nc --header="Authorization: Bearer $HF_TOKEN" \
+  https://huggingface.co/hkchengrex/av-benchmark/resolve/main/synchformer_state_dict.pth
+ls -la synchformer_state_dict.pth
+
+# ── audioldm_eval checkpoint ──────────────────────────────────────────────────
+rm -f "$HOME/.cache/audioldm_eval/ckpt/Cnn14_16k_mAP=0.438.pth"
+mkdir -p "$HOME/.cache/audioldm_eval/ckpt"
+cd "$HOME/.cache/audioldm_eval/ckpt"
+wget -nc "https://zenodo.org/records/3987831/files/Cnn14_16k_mAP%3D0.438.pth"
+ls -la "Cnn14_16k_mAP=0.438.pth"
+
+# ── GT eval-cache (PANN / CLAP / Synchformer features for VGGSound val+test) ──
+# Required by av_bench.evaluate() during mid-training and post-training eval.
+# Files land at ../data/eval-cache/vggsound-{val,test}/{pann,clap,sync}_features.pth
+PROJECT_DIR="$HOME/MMA/MMAudio"
+EVAL_CACHE_DIR="$PROJECT_DIR/data/eval-cache"
+mkdir -p "$EVAL_CACHE_DIR"
+
+# Use HF CLI if available, else fall back to wget for the two pann_features.pth
+if command -v huggingface-cli >/dev/null 2>&1; then
+    HF_TOKEN="$HF_TOKEN" huggingface-cli download \
+        hkchengrex/MMAudio-precomputed-results \
+        --repo-type dataset \
+        --local-dir "$EVAL_CACHE_DIR"
+else
+    for split in val test; do
+        mkdir -p "$EVAL_CACHE_DIR/vggsound-$split"
+        cd "$EVAL_CACHE_DIR/vggsound-$split"
+        for f in pann_features.pth clap_features.pth sync_features.pth; do
+            wget -nc --header="Authorization: Bearer $HF_TOKEN" \
+                "https://huggingface.co/datasets/hkchengrex/MMAudio-precomputed-results/resolve/main/vggsound-$split/$f" || true
+        done
+    done
+fi
+
+ls -la "$EVAL_CACHE_DIR/vggsound-val/" "$EVAL_CACHE_DIR/vggsound-test/"
+
+echo "All weights and eval caches downloaded successfully."
