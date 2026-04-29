@@ -18,6 +18,8 @@ class VideoJoiner:
 
     def join(self, video_id: str, output_name: str, audio: torch.Tensor):
         video_path = self.src_root / f'{video_id}.mp4'
+        if not video_path.is_file():
+            return
         output_path = self.output_root / f'{output_name}.mp4'
         merge_audio_into_video(video_path, output_path, audio, self.sample_rate,
                                self.duration_seconds)
