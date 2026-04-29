@@ -524,6 +524,22 @@ class Runner:
 
     @torch.inference_mode()
     def eval(self, audio_dir: Path, it: int, data_cfg: DictConfig) -> dict[str, float]:
+        # In eval-only mode (post-training): free the diffusion model + EMA from
+        # GPU before av_bench.extract loads PANN/VGGish/CLAP/Synchformer onto
+        # the same device. On 11 GB GPUs, both sets resident at once OOMs.
+        # Skipped during training so the next training step still has the model
+        # on GPU.
+        if not self.for_training:
+            self.network.cpu()
+            if hasattr(self, 'features') and self.features is not None:
+                self.features.cpu()
+            if hasattr(self, 'ema') and self.ema is not None:
+                try:
+                    self.ema.cpu()
+                except Exception:
+                    pass
+            torch.cuda.empty_cache()
+
         with torch.amp.autocast('cuda', enabled=False):
             if local_rank == 0:
                 extract(audio_path=audio_dir,
