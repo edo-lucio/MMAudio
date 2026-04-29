@@ -19,6 +19,7 @@ cudnn_benchmark: True
 compile: True
 amp: True
 enable_grad_scaler: False
+eval_extract_batch_size: 4
 weights: null
 checkpoint: null
 seed: 14159265
