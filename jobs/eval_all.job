@@ -57,15 +57,23 @@ PATTERN="${PATTERN:-output/gw_*}"
 MODEL="${MODEL:-small_16k}"
 DURATION="${DURATION:-8.0}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
+EXTRACT_BS="${EXTRACT_BS:-4}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 FORCE="${FORCE:-0}"
 COMPILE="${COMPILE:-False}"
+
+# Reduce CUDA memory fragmentation for the inference -> extract handoff.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # --- 5. Discover runs and pick the one for this array index ---
 mapfile -t RUNS < <(ls -1d $PATTERN 2>/dev/null | xargs -n1 basename | sort)
 N=${#RUNS[@]}
 if [ "$N" -eq 0 ]; then
     echo "ERROR: no runs match $PATTERN — submit training jobs first"
+    exit 2
+fi
+if [ -z "${SLURM_ARRAY_TASK_ID:-}" ]; then
+    echo "ERROR: SLURM_ARRAY_TASK_ID is unset — submit with --array=0-$((N-1)) (you have $N runs)"
     exit 2
 fi
 if [ "$SLURM_ARRAY_TASK_ID" -ge "$N" ]; then
@@ -96,6 +104,7 @@ OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=1 eval_run.py \
     model="$MODEL" \
     duration_s="$DURATION" \
     batch_size="$BATCH_SIZE" \
+    eval_extract_batch_size="$EXTRACT_BS" \
     num_workers="$NUM_WORKERS" \
     compile="$COMPILE"
 

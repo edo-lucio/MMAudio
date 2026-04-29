@@ -540,12 +540,17 @@ class Runner:
                     pass
             torch.cuda.empty_cache()
 
+        # Synchformer's AST is the heaviest of the four extractors; 32 OOMs on
+        # 11 GB GPUs. Read from cfg.eval_extract_batch_size (default 4) so it can
+        # be tuned per-cluster without code changes.
+        extract_bs = int(self.cfg.get('eval_extract_batch_size', 4))
+
         with torch.amp.autocast('cuda', enabled=False):
             if local_rank == 0:
                 extract(audio_path=audio_dir,
                         output_path=audio_dir / 'cache',
                         device='cuda',
-                        batch_size=32,
+                        batch_size=extract_bs,
                         audio_length=8)
                 output_metrics = evaluate(gt_audio_cache=Path(data_cfg.gt_cache),
                                           pred_audio_cache=audio_dir / 'cache')
