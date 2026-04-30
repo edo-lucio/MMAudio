@@ -1,0 +1,162 @@
+#!/bin/bash
+#SBATCH --job-name=mma_analysis
+#SBATCH --output=logs/analysis_%j.out
+#SBATCH --error=logs/analysis_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --time=04:00:00
+#SBATCH --partition=scavenge
+#SBATCH --gres=gpu:1
+#SBATCH --mail-user=edlu@itu.dk
+#SBATCH --mail-type=END,FAIL
+
+# Full post-eval analysis pipeline. Assumes:
+#   - output/<exp_id>/test-output_metrics.json exists for each run
+#   - output/<exp_id>/<exp_id>_ema_final.pth exists for runs you want geometry/couplings on
+#
+# Produces:
+#   output/_analysis/results.{md,csv}                (collect_metrics)
+#   paper/sections/results_table.tex                 (LaTeX table)
+#   analysis/curves/                                 (FM/GW loss plots)
+#   analysis/geometry/<variant>/                     (eff rank, t-SNE, spectrum)
+#   analysis/perclass/<variant>.png                  (per-class delta histograms)
+#   analysis/couplings/<variant>/                    (T* heatmaps + class rankings)
+#   analysis/motivation/                             (pre-training diagnostics, optional)
+#
+# Submit:  sbatch jobs/analysis_pipeline.job
+# Skip motivation:   SKIP_MOTIVATION=1 sbatch jobs/analysis_pipeline.job
+# Pick variants:     VARIANTS='global projected' sbatch jobs/analysis_pipeline.job
+
+PROJECT_DIR="$HOME/MMA/MMAudio"
+ENV_PATH="/home/edlu/miniconda3-25-5-1-1/envs/gwot"
+source "$PROJECT_DIR/jobs/_header.sh"
+
+mkdir -p logs analysis paper/sections paper/figures output/_analysis
+
+# ── Knobs ─────────────────────────────────────────────────────────────────────
+PATTERN="${PATTERN:-gw_*}"                       # for collect_metrics & analysis.py table/curves
+BASELINE="${BASELINE:-gw_baseline}"              # baseline run id for perclass/geometry comparisons
+VARIANTS="${VARIANTS:-global projected c_g fused}"
+SKIP_MOTIVATION="${SKIP_MOTIVATION:-0}"
+MMAUDIO_RELEASED_CKPT="${MMAUDIO_RELEASED_CKPT:-ext_weights/mmaudio_small_16k.pth}"
+MAX_MOTIVATION_SAMPLES="${MAX_MOTIVATION_SAMPLES:-2000}"
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# Reusable: skip a step if its output is already on disk and FORCE!=1.
+skip_if_done() {
+    local marker="$1"; local label="$2"
+    if [ -e "$marker" ] && [ "${FORCE:-0}" != "1" ]; then
+        echo "[skip] $label — $marker exists (set FORCE=1 to redo)"
+        return 0
+    fi
+    return 1
+}
+
+# ── 1. Aggregate metrics → markdown + CSV ────────────────────────────────────
+echo "=== [1/7] collect_metrics ==="
+if ! skip_if_done output/_analysis/results.md "collect_metrics"; then
+    python experiments/collect_metrics.py --pattern "$PATTERN"
+fi
+
+# ── 2. LaTeX table for the paper ─────────────────────────────────────────────
+echo "=== [2/7] LaTeX table ==="
+if ! skip_if_done paper/sections/results_table.tex "results_table.tex"; then
+    python experiments/analysis.py table \
+        --runs output/${PATTERN} \
+        --out paper/sections/results_table.tex
+fi
+
+# ── 3. Training-curve plots ──────────────────────────────────────────────────
+echo "=== [3/7] curves ==="
+if ! skip_if_done analysis/curves "curves/"; then
+    python experiments/analysis.py curves \
+        --runs output/${PATTERN} \
+        --out analysis/curves
+fi
+
+# ── 4. Geometry comparison: baseline vs each variant ─────────────────────────
+echo "=== [4/7] geometry per variant ==="
+BASELINE_CKPT="output/${BASELINE}/${BASELINE}_ema_final.pth"
+if [ ! -f "$BASELINE_CKPT" ]; then
+    echo "[warn] baseline checkpoint missing at $BASELINE_CKPT — skipping geometry/perclass/couplings"
+    SKIP_GW_STEPS=1
+fi
+
+for var in $VARIANTS; do
+    [ "${SKIP_GW_STEPS:-0}" = "1" ] && break
+    GW_CKPT="output/gw_var_${var}/gw_var_${var}_ema_final.pth"
+    OUT_DIR="analysis/geometry/${var}"
+    if [ ! -f "$GW_CKPT" ]; then
+        echo "[warn] missing $GW_CKPT — skipping geometry for variant=$var"
+        continue
+    fi
+    if skip_if_done "$OUT_DIR" "geometry/$var"; then continue; fi
+    python experiments/analysis.py geometry \
+        --baseline "$BASELINE_CKPT" \
+        --gw       "$GW_CKPT" \
+        --out      "$OUT_DIR"
+done
+
+# ── 5. Per-class IB-score delta histograms ───────────────────────────────────
+echo "=== [5/7] per-class deltas ==="
+for var in $VARIANTS; do
+    [ "${SKIP_GW_STEPS:-0}" = "1" ] && break
+    GW_DIR="output/gw_var_${var}"
+    OUT_PNG="analysis/perclass/${var}.png"
+    if [ ! -d "$GW_DIR" ]; then
+        echo "[warn] missing $GW_DIR — skipping perclass for variant=$var"
+        continue
+    fi
+    if skip_if_done "$OUT_PNG" "perclass/$var.png"; then continue; fi
+    mkdir -p analysis/perclass
+    python experiments/analysis.py perclass \
+        --baseline "output/${BASELINE}" \
+        --gw       "$GW_DIR" \
+        --out      "$OUT_PNG"
+done
+
+# ── 6. Coupling heatmaps per variant ─────────────────────────────────────────
+echo "=== [6/7] couplings per variant ==="
+for var in $VARIANTS; do
+    [ "${SKIP_GW_STEPS:-0}" = "1" ] && break
+    GW_CKPT="output/gw_var_${var}/gw_var_${var}_ema_final.pth"
+    OUT_DIR="analysis/couplings/${var}"
+    if [ ! -f "$GW_CKPT" ]; then
+        echo "[warn] missing $GW_CKPT — skipping couplings for variant=$var"
+        continue
+    fi
+    if skip_if_done "$OUT_DIR" "couplings/$var"; then continue; fi
+    python experiments/analyze_couplings.py \
+        --weights "$GW_CKPT" \
+        --variant "$var" \
+        --cfg     "exp_id=coupling_analysis_${var}" \
+        --out_dir "$OUT_DIR"
+done
+
+# ── 7. Pre-training motivation diagnostics (optional) ────────────────────────
+echo "=== [7/7] motivation (pre-training) ==="
+if [ "$SKIP_MOTIVATION" = "1" ]; then
+    echo "[skip] SKIP_MOTIVATION=1"
+elif [ ! -f "$MMAUDIO_RELEASED_CKPT" ]; then
+    echo "[warn] released checkpoint not found at $MMAUDIO_RELEASED_CKPT — set MMAUDIO_RELEASED_CKPT or SKIP_MOTIVATION=1"
+elif skip_if_done analysis/motivation "motivation/"; then
+    :
+else
+    python experiments/diagnose_geometry.py \
+        --weights "$MMAUDIO_RELEASED_CKPT" \
+        --out_dir analysis/motivation \
+        --max_samples "$MAX_MOTIVATION_SAMPLES"
+fi
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+echo
+echo "=== Pipeline complete. Outputs: ==="
+echo "  output/_analysis/results.{md,csv}"
+echo "  paper/sections/results_table.tex"
+echo "  analysis/{curves,geometry,perclass,couplings,motivation}/"
+echo
+echo "Pull to local with:"
+echo "  rsync -av cluster:'~/MMA/MMAudio/{output/_analysis,analysis,paper/sections,paper/figures}' ./"
