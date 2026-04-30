@@ -69,11 +69,18 @@ def main():
 
     out_path = args.out or (args.run / 'perclass_ib.json')
 
-    pred_path = args.run / 'test-output' / 'cache' / 'pann_features.pth'
+    # av_bench writes the predicted-side cache at <audio_dir>/cache where
+    # audio_dir = <run>/<tag>-sampled (tag='test' for ExtractedVGG_test).
+    pred_candidates = [
+        args.run / 'test-sampled' / 'cache' / 'pann_features.pth',
+        args.run / 'test-output' / 'cache' / 'pann_features.pth',
+    ]
+    pred_path = next((p for p in pred_candidates if p.is_file()), None)
     gt_path = args.gt_cache / 'pann_features.pth'
-    if not pred_path.is_file():
+    if pred_path is None:
         raise FileNotFoundError(
-            f'Missing predicted PANN features at {pred_path}. '
+            f'No predicted PANN features under {args.run}. '
+            f'Looked at: {[str(p) for p in pred_candidates]}. '
             f'Run eval_run.py / eval_all.job first.')
     if not gt_path.is_file():
         raise FileNotFoundError(f'Missing GT PANN features at {gt_path}.')
