@@ -104,7 +104,7 @@ OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=1 eval_run.py \
     model="$MODEL" \
     duration_s="$DURATION" \
     batch_size="$BATCH_SIZE" \
-    eval_extract_batch_size="$EXTRACT_BS" \
+    ++eval_extract_batch_size="$EXTRACT_BS" \
     num_workers="$NUM_WORKERS" \
     compile="$COMPILE"
 

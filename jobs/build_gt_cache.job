@@ -1,0 +1,108 @@
+#!/bin/bash
+#SBATCH --job-name=mma_build_gt_cache
+#SBATCH --output=logs/build_gt_cache_%j.out
+#SBATCH --error=logs/build_gt_cache_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --time=04:00:00
+#SBATCH --partition=scavenge
+#SBATCH --gres=gpu:1
+#SBATCH --mail-user=edlu@itu.dk
+#SBATCH --mail-type=FAIL
+
+# One-off: build the GT eval-cache for VGGSound test (and optionally val) so
+# av_bench.evaluate has all four feature files (pann/vggish/clap/sync) keyed
+# to your local clip IDs.
+#
+# Steps per split:
+#   1. ffmpeg-rip 8s mono 16kHz wav from each ./data/video/<id>.mp4 listed in
+#      training/example_output/memmap/vgg-<split>.tsv
+#   2. run av_bench.extract on the wav directory; output goes to
+#      ./data/eval-cache/vggsound-<split>-eval-cache/
+#
+# Submit:
+#   sbatch jobs/build_gt_cache.job                       # builds 'test' only
+#   SPLITS='test val' sbatch jobs/build_gt_cache.job     # both
+#   FORCE=1 sbatch jobs/build_gt_cache.job               # re-rip wavs even if present
+
+PROJECT_DIR="$HOME/MMA/MMAudio"
+ENV_PATH="/home/edlu/miniconda3-25-5-1-1/envs/gwot"
+source "$PROJECT_DIR/jobs/_header.sh"
+
+mkdir -p logs
+
+SPLITS="${SPLITS:-test}"
+FORCE="${FORCE:-0}"
+EXTRACT_BS="${EXTRACT_BS:-4}"
+DURATION="${DURATION:-8}"
+SAMPLE_RATE="${SAMPLE_RATE:-16000}"
+VIDEO_DIR="${VIDEO_DIR:-./data/video}"
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+for split in $SPLITS; do
+    echo "=== Building GT cache for split=$split ==="
+    TSV="training/example_output/memmap/vgg-${split}.tsv"
+    WAV_DIR="./data/eval-cache/vggsound-${split}-gt-wav"
+    OUT_DIR="./data/eval-cache/vggsound-${split}-eval-cache"
+
+    if [ ! -f "$TSV" ]; then
+        echo "ERROR: tsv not found at $TSV — skipping split=$split"
+        continue
+    fi
+
+    mkdir -p "$WAV_DIR" "$OUT_DIR"
+
+    # 1. Rip GT audio per clip id.
+    n_ripped=0; n_missing=0
+    while read -r id; do
+        src="${VIDEO_DIR}/${id}.mp4"
+        out="${WAV_DIR}/${id}.wav"
+        if [ ! -f "$src" ]; then
+            n_missing=$((n_missing + 1))
+            continue
+        fi
+        if [ -f "$out" ] && [ "$FORCE" != "1" ]; then
+            continue
+        fi
+        ffmpeg -y -i "$src" -vn -ac 1 -ar "$SAMPLE_RATE" -t "$DURATION" "$out" \
+            </dev/null >/dev/null 2>&1 && n_ripped=$((n_ripped + 1))
+    done < <(awk 'NR>1 {print $1}' "$TSV")
+
+    n_total=$(ls -1 "$WAV_DIR" 2>/dev/null | wc -l)
+    echo "split=$split: ripped=$n_ripped, missing_video=$n_missing, total_wavs=$n_total"
+
+    if [ "$n_total" -eq 0 ]; then
+        echo "ERROR: no wavs in $WAV_DIR — skipping extract for split=$split"
+        continue
+    fi
+
+    # 2. av_bench.extract over the wav dir.
+    python - <<PY
+from pathlib import Path
+# Patch: av_bench's vendored ASTModel calls self.get_head_mask but doesn't
+# inherit from transformers.PreTrainedModel/ModuleUtilsMixin. av_bench only
+# passes head_mask=None, so a no-op fallback suffices.
+from av_bench.synchformer.hf_src.modeling_ast import ASTModel as _AVBenchASTModel
+if not hasattr(_AVBenchASTModel, 'get_head_mask'):
+    def _ast_get_head_mask(self, head_mask, num_hidden_layers, is_attention_chunked=False):
+        if head_mask is None:
+            return [None] * num_hidden_layers
+        raise NotImplementedError('av_bench ASTModel patch: non-None head_mask not supported')
+    _AVBenchASTModel.get_head_mask = _ast_get_head_mask
+
+from av_bench.extract import extract
+extract(audio_path=Path('${WAV_DIR}'),
+        output_path=Path('${OUT_DIR}'),
+        device='cuda',
+        batch_size=${EXTRACT_BS},
+        audio_length=${DURATION})
+PY
+
+    echo "split=$split done. Files in $OUT_DIR:"
+    ls -la "$OUT_DIR"
+done
+
+echo "All requested splits processed."
