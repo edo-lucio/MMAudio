@@ -27,8 +27,50 @@ import torch.nn.functional as F
 
 
 def load_features(path: Path) -> dict[str, torch.Tensor]:
-    """av_bench writes a dict mapping clip_id -> feature tensor."""
-    return torch.load(path, map_location='cpu', weights_only=True)
+    """Normalize av_bench feature dumps to a flat {clip_id: 1D tensor} dict.
+
+    Observed layouts:
+      A. {clip_id: tensor}                            (flat — simplest)
+      B. {clip_id: {feature_name: tensor, ...}}        (nested per-clip dict)
+      C. {'ids': [...], 'features': stacked_tensor}    (parallel arrays)
+      D. {clip_id: tensor of shape (T, D) or (D,)}     (may need pooling)
+    """
+    raw = torch.load(path, map_location='cpu', weights_only=True)
+
+    # Layout C: parallel arrays
+    if isinstance(raw, dict) and 'ids' in raw and 'features' in raw:
+        ids = list(raw['ids'])
+        feats = raw['features']
+        return {ids[i]: feats[i].flatten().float() for i in range(len(ids))}
+
+    if not isinstance(raw, dict):
+        raise ValueError(f'Unexpected feature file layout in {path}: type={type(raw)}')
+
+    out: dict[str, torch.Tensor] = {}
+    for cid, val in raw.items():
+        # Layout B: nested dict per clip. Prefer 'features'/'embedding' keys,
+        # fall back to the first tensor value.
+        if isinstance(val, dict):
+            t = None
+            for pref in ('features', 'embedding', 'embeddings', 'feature'):
+                if pref in val and torch.is_tensor(val[pref]):
+                    t = val[pref]
+                    break
+            if t is None:
+                tensor_vals = [v for v in val.values() if torch.is_tensor(v)]
+                if not tensor_vals:
+                    continue
+                t = tensor_vals[0]
+        elif torch.is_tensor(val):
+            t = val
+        else:
+            continue
+        # Pool any leading time/seq dimensions to a single 1D vector.
+        t = t.float()
+        if t.ndim > 1:
+            t = t.mean(dim=tuple(range(t.ndim - 1)))
+        out[str(cid)] = t.flatten()
+    return out
 
 
 def read_id_to_label(tsv_path: Path) -> dict[str, str]:
