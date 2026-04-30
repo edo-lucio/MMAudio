@@ -121,7 +121,21 @@ for var in $VARIANTS; do
 done
 
 # ── 5. Per-class IB-score delta histograms ───────────────────────────────────
+# cmd_perclass needs <run>/perclass_ib.json; compute_perclass_ib.py produces it
+# from already-extracted PANN features (pred + GT) keyed by clip id.
+GT_CACHE="${GT_CACHE:-./data/eval-cache/vggsound-test-eval-cache}"
+TEST_TSV="${TEST_TSV:-training/example_output/memmap/vgg-test.tsv}"
+
 echo "=== [5/7] per-class deltas ==="
+# Produce baseline perclass_ib.json first.
+if [ "${SKIP_GW_STEPS:-0}" != "1" ] && \
+   ! skip_if_done "output/${BASELINE}/perclass_ib.json" "perclass_ib/$BASELINE"; then
+    python experiments/compute_perclass_ib.py \
+        --run      "output/${BASELINE}" \
+        --gt_cache "$GT_CACHE" \
+        --tsv      "$TEST_TSV"
+fi
+
 for var in $VARIANTS; do
     [ "${SKIP_GW_STEPS:-0}" = "1" ] && break
     GW_DIR="output/gw_var_${var}"
@@ -129,6 +143,13 @@ for var in $VARIANTS; do
     if [ ! -d "$GW_DIR" ]; then
         echo "[warn] missing $GW_DIR — skipping perclass for variant=$var"
         continue
+    fi
+    # Produce per-variant perclass_ib.json.
+    if ! skip_if_done "$GW_DIR/perclass_ib.json" "perclass_ib/gw_var_${var}"; then
+        python experiments/compute_perclass_ib.py \
+            --run      "$GW_DIR" \
+            --gt_cache "$GT_CACHE" \
+            --tsv      "$TEST_TSV"
     fi
     if skip_if_done "$OUT_PNG" "perclass/$var.png"; then continue; fi
     mkdir -p analysis/perclass
