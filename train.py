@@ -57,6 +57,11 @@ def train(cfg: DictConfig):
         cfg.data_dim.latent_seq_len = seq_cfg.latent_seq_len
         cfg.data_dim.clip_seq_len = seq_cfg.clip_seq_len
         cfg.data_dim.sync_seq_len = seq_cfg.sync_seq_len
+    with open_dict(eval_cfg):
+        if 'data_dim' in eval_cfg:
+            eval_cfg.data_dim.latent_seq_len = seq_cfg.latent_seq_len
+            eval_cfg.data_dim.clip_seq_len = seq_cfg.clip_seq_len
+            eval_cfg.data_dim.sync_seq_len = seq_cfg.sync_seq_len
 
     # wrap python logger with a tensorboard logger
     log = TensorboardLogger(cfg.exp_id,
