@@ -78,26 +78,46 @@ if ! skip_if_done analysis/curves "curves/"; then
 fi
 
 # ── 4. Geometry comparison: baseline vs each variant ─────────────────────────
+# cmd_geometry needs pre-extracted feature dumps at <run>/gw_features.pt;
+# experiments/dump_features.py produces them.
 echo "=== [4/7] geometry per variant ==="
 BASELINE_CKPT="output/${BASELINE}/${BASELINE}_ema_final.pth"
+BASELINE_FEATS="output/${BASELINE}/gw_features.pt"
 if [ ! -f "$BASELINE_CKPT" ]; then
     echo "[warn] baseline checkpoint missing at $BASELINE_CKPT — skipping geometry/perclass/couplings"
     SKIP_GW_STEPS=1
 fi
 
+# baseline features (variant=global is fine for the baseline; we just need raw reps)
+if [ "${SKIP_GW_STEPS:-0}" != "1" ] && ! skip_if_done "$BASELINE_FEATS" "dump_features/$BASELINE"; then
+    python experiments/dump_features.py \
+        --weights "$BASELINE_CKPT" \
+        --variant global \
+        --out     "$BASELINE_FEATS"
+fi
+
 for var in $VARIANTS; do
     [ "${SKIP_GW_STEPS:-0}" = "1" ] && break
     GW_CKPT="output/gw_var_${var}/gw_var_${var}_ema_final.pth"
+    GW_FEATS="output/gw_var_${var}/gw_features.pt"
     OUT_DIR="analysis/geometry/${var}"
     if [ ! -f "$GW_CKPT" ]; then
         echo "[warn] missing $GW_CKPT — skipping geometry for variant=$var"
         continue
     fi
+    # Dump features for this variant if not present.
+    if ! skip_if_done "$GW_FEATS" "dump_features/gw_var_${var}"; then
+        python experiments/dump_features.py \
+            --weights "$GW_CKPT" \
+            --variant "$var" \
+            --out     "$GW_FEATS"
+    fi
     if skip_if_done "$OUT_DIR" "geometry/$var"; then continue; fi
+    mkdir -p "$OUT_DIR"
     python experiments/analysis.py geometry \
-        --baseline "$BASELINE_CKPT" \
-        --gw       "$GW_CKPT" \
-        --out      "$OUT_DIR"
+        --baseline "$BASELINE_FEATS" \
+        --gw       "$GW_FEATS" \
+        --out      "$OUT_DIR/spectrum.png"
 done
 
 # ── 5. Per-class IB-score delta histograms ───────────────────────────────────
