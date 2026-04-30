@@ -173,7 +173,6 @@ for var in $VARIANTS; do
     python experiments/analyze_couplings.py \
         --weights "$GW_CKPT" \
         --variant "$var" \
-        --cfg     "exp_id=coupling_analysis_${var}" \
         --out_dir "$OUT_DIR"
 done
 
