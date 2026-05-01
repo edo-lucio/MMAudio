@@ -13,11 +13,10 @@
 #SBATCH --mail-user=edlu@itu.dk
 #SBATCH --mail-type=FAIL,ARRAY_TASKS
 
-# Experiment 2: variant sweep. Each array task = 1 variant on 2 GPUs.
+# Variant sweep. Each array task = 1 variant on 2 GPUs.
 #   0 -> global   1 -> projected   2 -> c_g   3 -> fused
-# Submit per seed for error bars:
-#   for s in 0 1 2; do sbatch --export=ALL,SEED=$s jobs/train_variants.job; done
-# Override lambda: sbatch --export=ALL,LAMBDA=0.005,SEED=0 jobs/train_variants.job
+# Submit:  sbatch jobs/train_variants.job
+# Override lambda: sbatch --export=ALL,LAMBDA=0.005 jobs/train_variants.job
 
 set -e
 set -x
@@ -58,7 +57,6 @@ LAMBDA="${LAMBDA:-0.01}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE}}"
 COMPILE="${COMPILE:-False}"   # default False because sm_75 (Tesla T4) can't JIT bf16 kernels
-SEED="${SEED:-0}"
 
 # Anti-collapse penalty: enable on learnable-projector variants only.
 AC_WEIGHT="${AC_WEIGHT:-1e-2}"
@@ -69,8 +67,7 @@ case "$VAR" in
 esac
 
 OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=2 "$PROJECT_DIR/src/train.py" \
-    exp_id="gw_var_${VAR}_s${SEED}" \
-    seed="$SEED" \
+    exp_id="gw_var_${VAR}" \
     model="$MODEL" \
     num_iterations="$ITERS" \
     batch_size="$BATCH_SIZE" \
@@ -82,4 +79,4 @@ OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=2 "$PROJECT_DIR/src/tra
     gw_regularization.detach_video=true \
     gw_regularization.anticollapse_weight="$AC_W"
 
-echo "Done: gw_var_${VAR}_s${SEED}"
+echo "Done: gw_var_${VAR}"

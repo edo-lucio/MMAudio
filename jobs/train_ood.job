@@ -51,14 +51,13 @@ echo "Cache warm."
 
 mkdir -p logs output
 
-VAR="${BEST_VARIANT:-global}"
+VAR="${OOD_VARIANT:-${BEST_VARIANT:-global}}"
 MODEL="${MODEL:-small_16k}"
 ITERS="${ITERS:-300000}"
 LAMBDA="${LAMBDA:-0.01}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE}}"
 COMPILE="${COMPILE:-False}"   # default False because sm_75 (Tesla T4) can't JIT bf16 kernels
-SEED="${SEED:-0}"
 
 # Anti-collapse penalty: enable on learnable-projector variants only.
 AC_WEIGHT="${AC_WEIGHT:-1e-2}"
@@ -74,22 +73,21 @@ COMMON=(
     batch_size="$BATCH_SIZE"
     eval_batch_size="$EVAL_BATCH_SIZE"
     compile="$COMPILE"
-    seed="$SEED"
 )
 
 case "$SLURM_ARRAY_TASK_ID" in
     0)
         OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=2 "$PROJECT_DIR/src/train.py" \
-            exp_id="gw_ood_baseline_s${SEED}" \
+            exp_id="gw_ood_baseline" \
             model="$MODEL" \
             num_iterations="$ITERS" \
             gw_regularization.enabled=false \
             "${COMMON[@]}"
-        echo "Done: gw_ood_baseline_s${SEED}"
+        echo "Done: gw_ood_baseline"
         ;;
     1)
         OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=2 "$PROJECT_DIR/src/train.py" \
-            exp_id="gw_ood_${VAR}_s${SEED}" \
+            exp_id="gw_ood_${VAR}" \
             model="$MODEL" \
             num_iterations="$ITERS" \
             gw_regularization.enabled=true \
@@ -98,6 +96,6 @@ case "$SLURM_ARRAY_TASK_ID" in
             gw_regularization.detach_video=true \
             gw_regularization.anticollapse_weight="$AC_W" \
             "${COMMON[@]}"
-        echo "Done: gw_ood_${VAR}_s${SEED}"
+        echo "Done: gw_ood_${VAR}"
         ;;
 esac

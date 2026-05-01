@@ -45,8 +45,7 @@ echo "Cache warm."
 
 mkdir -p logs output
 
-SEED="${SEED:-0}"
-EXP_ID="${EXP_ID:-gw_baseline_s${SEED}}"
+EXP_ID="${EXP_ID:-gw_baseline}"
 MODEL="${MODEL:-small_16k}"
 ITERS="${ITERS:-300000}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
@@ -55,7 +54,6 @@ COMPILE="${COMPILE:-False}"   # default False because sm_75 (Tesla T4) can't JIT
 
 OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=2 "$PROJECT_DIR/src/train.py" \
     exp_id="$EXP_ID" \
-    seed="$SEED" \
     model="$MODEL" \
     num_iterations="$ITERS" \
     batch_size="$BATCH_SIZE" \
