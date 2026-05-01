@@ -35,6 +35,9 @@ source /opt/itu/easybuild/software/Miniconda3/25.5.1-1/etc/profile.d/conda.sh
 conda activate "$ENV_PATH"
 cd "$PROJECT_DIR"
 
+# --- 2b. Make `import mmaudio` work for src/ layout ---
+export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:${PYTHONPATH}}"
+
 # --- 3. Avoid `import torch` hang on shared FS ---
 # Skip torch's third-party device-backend autoloader (PyTorch >= 2.5 honors this).
 # Pre-warm the FS cache by importing torch once, single-process, before torchrun
@@ -61,7 +64,7 @@ BATCH_SIZE="${BATCH_SIZE:-32}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE}}"
 COMPILE="${COMPILE:-False}"   # default False because sm_75 (Tesla T4) can't JIT bf16 kernels
 
-OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=2 train.py \
+OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=2 "$PROJECT_DIR/src/train.py" \
     exp_id="gw_${G}_sync_${S}" \
     model="$MODEL" \
     num_iterations="$ITERS" \

@@ -46,7 +46,7 @@ torch.backends.cudnn.allow_tf32 = True
 log = logging.getLogger()
 
 
-@hydra.main(version_base='1.3.2', config_path='config', config_name='eval_config.yaml')
+@hydra.main(version_base='1.3.2', config_path='../config', config_name='eval_config.yaml')
 def main(cfg: DictConfig):
     distributed.init_process_group(backend='nccl', timeout=timedelta(hours=2))
     torch.cuda.set_device(local_rank)

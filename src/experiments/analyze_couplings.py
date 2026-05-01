@@ -26,10 +26,12 @@ from mmaudio.data.extracted_vgg import ExtractedVGG
 from mmaudio.model.gw_regularization import compute_gw_regularization
 from mmaudio.model.networks import get_my_mmaudio
 from mmaudio.model.sequence_config import CONFIG_16K
+from mmaudio.utils.paths import repo_path
 
 
 def load_model(weights_path: str, cfg):
-    empty_string_feat = torch.load('./ext_weights/empty_string.pth', weights_only=True)[0]
+    empty_string_feat = torch.load(repo_path('ext_weights', 'empty_string.pth'),
+                                   weights_only=True)[0]
     net = get_my_mmaudio(cfg.model, empty_string_feat=empty_string_feat).cuda().eval()
     sd = torch.load(weights_path, map_location='cuda', weights_only=True)
     net.load_weights(sd)
@@ -49,7 +51,7 @@ def main():
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    with initialize(version_base='1.3.2', config_path='../config'):
+    with initialize(version_base='1.3.2', config_path='../../config'):
         cfg = compose('train_config')
 
     seq_cfg = CONFIG_16K
@@ -86,7 +88,7 @@ def main():
         video_exist = torch.stack([r['video_exist'] for r in rows]).cuda()
 
         a_mean_norm = net.normalize(a_mean.clone())
-        _, T = compute_gw_regularization(
+        _, T, _ = compute_gw_regularization(
             net,
             variant=args.variant,
             clip_f_raw=clip_f,

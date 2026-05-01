@@ -29,7 +29,7 @@ MAX_SAMPLES="${MAX_SAMPLES:-2000}"
 
 mkdir -p logs analysis/motivation
 
-python experiments/diagnose_geometry.py \
+python "$EXPERIMENTS_DIR/diagnose_geometry.py" \
     --weights "$WEIGHTS" \
     --out_dir analysis/motivation \
     --max_samples "$MAX_SAMPLES"

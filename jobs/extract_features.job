@@ -24,6 +24,6 @@ source "$PROJECT_DIR/jobs/_header.sh"
 mkdir -p logs ./training/example_ouptut/latents/video ./training/example_output/v1-16-memmap
 
 torchrun --standalone --nproc_per_node=2 \
-    training/extract_video_training_latents.py \
+    "$TRAINING_DIR/extract_video_training_latents.py" \
     --latent_dir ./training/example_output/latents/video \
     --output_dir ./training/example_output/v1-16-memmap

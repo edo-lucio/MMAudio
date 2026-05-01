@@ -58,7 +58,7 @@ skip_if_done() {
 # ── 1. Aggregate metrics → markdown + CSV ────────────────────────────────────
 echo "=== [1/7] collect_metrics ==="
 if ! skip_if_done output/_analysis/results.md "collect_metrics"; then
-    python experiments/collect_metrics.py --pattern "$PATTERN"
+    python "$EXPERIMENTS_DIR/collect_metrics.py" --pattern "$PATTERN"
 fi
 
 # ── 2. LaTeX table for the paper ─────────────────────────────────────────────

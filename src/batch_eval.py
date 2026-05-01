@@ -25,7 +25,7 @@ log = logging.getLogger()
 
 
 @torch.inference_mode()
-@hydra.main(version_base='1.3.2', config_path='config', config_name='eval_config.yaml')
+@hydra.main(version_base='1.3.2', config_path='../config', config_name='eval_config.yaml')
 def main(cfg: DictConfig):
     device = 'cuda'
     torch.cuda.set_device(local_rank)

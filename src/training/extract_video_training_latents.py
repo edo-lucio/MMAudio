@@ -16,6 +16,7 @@ from mmaudio.data.data_setup import error_avoidance_collate
 from mmaudio.data.extraction.vgg_sound import VGGSound
 from mmaudio.model.utils.features_utils import FeaturesUtils
 from mmaudio.utils.dist_utils import local_rank, world_size
+from mmaudio.utils.paths import repo_path
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -24,8 +25,8 @@ torch.backends.cudnn.allow_tf32 = True
 SAMPLING_RATE = 16000
 DURATION_SEC = 8.0
 NUM_SAMPLES = 128000
-vae_path = './ext_weights/v1-16.pth'
-bigvgan_path = './ext_weights/best_netG.pt'
+vae_path = str(repo_path('ext_weights', 'v1-16.pth'))
+bigvgan_path = str(repo_path('ext_weights', 'best_netG.pt'))
 mode = '16k'
 
 # for the 44.1kHz model
@@ -37,11 +38,11 @@ NOTE: 352800 (8*44100) is not divisible by (STFT hop size * VAE downsampling rat
 # SAMPLING_RATE = 44100
 # DURATION_SEC = 8.0
 # NUM_SAMPLES = 353280
-# vae_path = './ext_weights/v1-44.pth'
+# vae_path = str(repo_path('ext_weights', 'v1-44.pth'))
 # bigvgan_path = None
 # mode = '44k'
 
-synchformer_ckpt = './ext_weights/synchformer_state_dict.pth'
+synchformer_ckpt = str(repo_path('ext_weights', 'synchformer_state_dict.pth'))
 
 # per-GPU
 BATCH_SIZE = 8

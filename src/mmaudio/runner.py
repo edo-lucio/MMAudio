@@ -37,6 +37,7 @@ from mmaudio.model.utils.sample_utils import log_normal_sample
 from mmaudio.utils.dist_utils import (info_if_rank_zero, local_rank, string_if_rank_zero)
 from mmaudio.utils.log_integrator import Integrator
 from mmaudio.utils.logger import TensorboardLogger
+from mmaudio.utils.paths import repo_path
 from mmaudio.utils.time_estimator import PartialTimeEstimator, TimeEstimator
 from mmaudio.utils.video_joiner import VideoJoiner
 
@@ -69,7 +70,8 @@ class Runner:
         self.duration_sec = self.seq_cfg.duration
 
         # setting up the model
-        empty_string_feat = torch.load('./ext_weights/empty_string.pth', weights_only=True)[0]
+        empty_string_feat = torch.load(repo_path('ext_weights', 'empty_string.pth'),
+                                       weights_only=True)[0]
         self.network = DDP(get_my_mmaudio(cfg.model,
                                           latent_mean=latent_mean,
                                           latent_std=latent_std,
@@ -102,20 +104,24 @@ class Runner:
         self.rng = torch.Generator(device='cuda')
         self.rng.manual_seed(cfg['seed'] + local_rank)
 
-        # setting up feature extractors and VAEs
+        # setting up feature extractors and VAEs.
+        # cfg paths are repo-root-relative; resolve them so they survive Hydra's
+        # CWD change to output/<exp_id>/.
+        def _ckpt(key):
+            return str(repo_path(cfg[key]))
         if mode == '16k':
             self.features = FeaturesUtils(
-                tod_vae_ckpt=cfg['vae_16k_ckpt'],
-                bigvgan_vocoder_ckpt=cfg['bigvgan_vocoder_ckpt'],
-                synchformer_ckpt=cfg['synchformer_ckpt'],
+                tod_vae_ckpt=_ckpt('vae_16k_ckpt'),
+                bigvgan_vocoder_ckpt=_ckpt('bigvgan_vocoder_ckpt'),
+                synchformer_ckpt=_ckpt('synchformer_ckpt'),
                 enable_conditions=True,
                 mode=mode,
                 need_vae_encoder=False,
             )
         elif mode == '44k':
             self.features = FeaturesUtils(
-                tod_vae_ckpt=cfg['vae_44k_ckpt'],
-                synchformer_ckpt=cfg['synchformer_ckpt'],
+                tod_vae_ckpt=_ckpt('vae_44k_ckpt'),
+                synchformer_ckpt=_ckpt('synchformer_ckpt'),
                 enable_conditions=True,
                 mode=mode,
                 need_vae_encoder=False,
@@ -339,7 +345,7 @@ class Runner:
                 )
                 # normalized audio latent (same normalization used inside the network)
                 a_mean_norm = self.network.module.normalize(a_mean.clone())
-                gw_loss, _ = compute_gw_regularization(
+                gw_loss, _, ac_loss = compute_gw_regularization(
                     self.network.module,
                     variant=self.gw_cfg.variant,
                     clip_f_raw=gw_clip_f,
@@ -349,10 +355,14 @@ class Runner:
                     num_sinkhorn_iter=self.gw_cfg.num_sinkhorn_iter,
                     epsilon=self.gw_cfg.epsilon,
                     alpha=self.gw_cfg.alpha,
+                    anticollapse_weight=float(self.gw_cfg.get('anticollapse_weight', 0.0)),
+                    anticollapse_eta=float(self.gw_cfg.get('anticollapse_eta', 1e-3)),
+                    anticollapse_target=str(self.gw_cfg.get('anticollapse_target', 'both')),
                 )
                 self.train_integrator.add_dict({
                     'gw_loss': gw_loss.detach(),
                     'gw_lambda': torch.tensor(eff_lambda, device=gw_loss.device),
+                    'gw_anticollapse': ac_loss,
                 })
                 total_loss = mean_loss + eff_lambda * gw_loss
             mean_loss = total_loss

@@ -34,7 +34,7 @@ def distributed_setup():
 
 
 @record
-@hydra.main(version_base='1.3.2', config_path='config', config_name='train_config.yaml')
+@hydra.main(version_base='1.3.2', config_path='../config', config_name='train_config.yaml')
 def train(cfg: DictConfig):
     # initial setup
     torch.cuda.set_device(local_rank)
@@ -53,15 +53,14 @@ def train(cfg: DictConfig):
         seq_cfg = CONFIG_44K
     else:
         raise ValueError(f'Unknown model: {cfg.model}')
-    with open_dict(cfg):
+    with open_dict(cfg), open_dict(cfg.data_dim):
         cfg.data_dim.latent_seq_len = seq_cfg.latent_seq_len
         cfg.data_dim.clip_seq_len = seq_cfg.clip_seq_len
         cfg.data_dim.sync_seq_len = seq_cfg.sync_seq_len
-    with open_dict(eval_cfg):
-        if 'data_dim' in eval_cfg:
-            eval_cfg.data_dim.latent_seq_len = seq_cfg.latent_seq_len
-            eval_cfg.data_dim.clip_seq_len = seq_cfg.clip_seq_len
-            eval_cfg.data_dim.sync_seq_len = seq_cfg.sync_seq_len
+    with open_dict(eval_cfg), open_dict(eval_cfg.data_dim):
+        eval_cfg.data_dim.latent_seq_len = seq_cfg.latent_seq_len
+        eval_cfg.data_dim.clip_seq_len = seq_cfg.clip_seq_len
+        eval_cfg.data_dim.sync_seq_len = seq_cfg.sync_seq_len
 
     # wrap python logger with a tensorboard logger
     log = TensorboardLogger(cfg.exp_id,

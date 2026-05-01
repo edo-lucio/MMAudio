@@ -21,10 +21,10 @@ source "$PROJECT_DIR/jobs/_header.sh"
 mkdir -p logs output/_analysis
 
 # 1) Loss / metric curves across all gw_* runs
-python experiments/analysis.py curves --runs output/gw_*
+python "$EXPERIMENTS_DIR/analysis.py" curves --runs output/gw_*
 
 # 2) Coupling-matrix visualization for the best GW run (set via BEST_RUN env)
 if [ -n "${BEST_RUN:-}" ] && [ -f "output/${BEST_RUN}/${BEST_RUN}_ema_final.pth" ]; then
-    python experiments/analyze_couplings.py \
+    python "$EXPERIMENTS_DIR/analyze_couplings.py" \
         --weights "output/${BEST_RUN}/${BEST_RUN}_ema_final.pth"
 fi

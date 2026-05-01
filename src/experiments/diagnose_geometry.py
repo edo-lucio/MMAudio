@@ -38,12 +38,13 @@ from mmaudio.model.gw_regularization import (
 )
 from mmaudio.model.networks import get_my_mmaudio
 from mmaudio.model.sequence_config import CONFIG_16K
+from mmaudio.utils.paths import repo_path
 
 VARIANTS = ['global', 'projected', 'c_g', 'fused']
 
 
 def load_net(weights_path, cfg):
-    empty = torch.load('./ext_weights/empty_string.pth', weights_only=True)[0]
+    empty = torch.load(repo_path('ext_weights', 'empty_string.pth'), weights_only=True)[0]
     net = get_my_mmaudio(cfg.model, empty_string_feat=empty).cuda().eval()
     sd = torch.load(weights_path, map_location='cuda', weights_only=True)
     net.load_weights(sd)
@@ -210,7 +211,7 @@ def plot_coupling_heatmap(net, dset, out_path, variant='global',
         a_mean = torch.stack([r['a_mean'] for r in rows]).cuda()
         video_exist = torch.stack([r['video_exist'] for r in rows]).cuda()
         a_mean_norm = net.normalize(a_mean.clone())
-        _, T = compute_gw_regularization(
+        _, T, _ = compute_gw_regularization(
             net, variant=variant, clip_f_raw=clip_f, x1=a_mean_norm,
             video_exist=video_exist, detach_video=True,
         )
@@ -253,7 +254,7 @@ def main():
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    with initialize(version_base='1.3.2', config_path='../config'):
+    with initialize(version_base='1.3.2', config_path='../../config'):
         cfg = compose('train_config')
 
     dset = load_test_dset(cfg)

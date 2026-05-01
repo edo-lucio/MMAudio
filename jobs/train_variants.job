@@ -15,8 +15,9 @@
 
 # Experiment 2: variant sweep. Each array task = 1 variant on 2 GPUs.
 #   0 -> global   1 -> projected   2 -> c_g   3 -> fused
-# Submit:  sbatch jobs/train_variants.job
-# Override lambda: sbatch --export=ALL,LAMBDA=0.005 jobs/train_variants.job
+# Submit per seed for error bars:
+#   for s in 0 1 2; do sbatch --export=ALL,SEED=$s jobs/train_variants.job; done
+# Override lambda: sbatch --export=ALL,LAMBDA=0.005,SEED=0 jobs/train_variants.job
 
 set -e
 set -x
@@ -33,6 +34,9 @@ module load Miniconda3/25.5.1-1
 source /opt/itu/easybuild/software/Miniconda3/25.5.1-1/etc/profile.d/conda.sh
 conda activate "$ENV_PATH"
 cd "$PROJECT_DIR"
+
+# --- 2b. Make `import mmaudio` work for src/ layout ---
+export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 # --- 3. Avoid `import torch` hang on shared FS ---
 # Skip torch's third-party device-backend autoloader (PyTorch >= 2.5 honors this).
@@ -54,9 +58,19 @@ LAMBDA="${LAMBDA:-0.01}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE}}"
 COMPILE="${COMPILE:-False}"   # default False because sm_75 (Tesla T4) can't JIT bf16 kernels
+SEED="${SEED:-0}"
 
-OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=2 train.py \
-    exp_id="gw_var_${VAR}" \
+# Anti-collapse penalty: enable on learnable-projector variants only.
+AC_WEIGHT="${AC_WEIGHT:-1e-2}"
+case "$VAR" in
+    global) AC_W=0.0 ;;
+    projected|c_g|fused) AC_W="$AC_WEIGHT" ;;
+    *) AC_W=0.0 ;;
+esac
+
+OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=2 "$PROJECT_DIR/src/train.py" \
+    exp_id="gw_var_${VAR}_s${SEED}" \
+    seed="$SEED" \
     model="$MODEL" \
     num_iterations="$ITERS" \
     batch_size="$BATCH_SIZE" \
@@ -64,6 +78,8 @@ OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=2 train.py \
     compile="$COMPILE" \
     gw_regularization.enabled=true \
     gw_regularization.variant="$VAR" \
-    gw_regularization.lambda_gw="$LAMBDA"
+    gw_regularization.lambda_gw="$LAMBDA" \
+    gw_regularization.detach_video=true \
+    gw_regularization.anticollapse_weight="$AC_W"
 
-echo "Done: gw_var_${VAR}"
+echo "Done: gw_var_${VAR}_s${SEED}"

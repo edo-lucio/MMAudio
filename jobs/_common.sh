@@ -9,6 +9,14 @@ export MKL_NUM_THREADS=2
 export NUMEXPR_NUM_THREADS=2
 export VECLIB_MAXIMUM_THREADS=2
 
+# Source layout: all entry points live under src/; jobs run from $PROJECT_DIR.
+# Use these instead of hard-coding the path.
+export SRC_DIR="${PROJECT_DIR}/src"
+export EXPERIMENTS_DIR="${SRC_DIR}/experiments"
+export TRAINING_DIR="${SRC_DIR}/training"
+# Make `import mmaudio` work regardless of CWD.
+export PYTHONPATH="${SRC_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+
 # Useful log lines for debugging limits
 echo "host=$(hostname)  ulimit -u: $(ulimit -u)  nproc: $(nproc)"
 echo "cuda: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"

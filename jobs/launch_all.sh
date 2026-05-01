@@ -1,23 +1,30 @@
 #!/bin/bash
-# Submit every GW-experiment training job in one go.
+# Submit the slimmed GW-experiment matrix.
 #
-# Each train_*.job is a SLURM array (one task per config); this script just
-# fires off `sbatch` for each one. Ordering on the cluster queue is not
-# enforced -- they all enter the queue at once and run as GPUs become free.
+# Slimmed plan (matches src/experiments/run_gw_experiments.sh):
+#   phase1 = baseline + variants
+#   phase2 = lambda sweep on BEST_VARIANT  (3 lambdas: 0.001 / 0.005 / 0.01)
+#   phase3 = OOD baseline + OOD GW
+#   all    = phase1 + phase2 + phase3
+#
+# Detach / schedule / GW x sync ablations are kept available as separate
+# *.job files but are no longer submitted by `all`. Submit explicitly:
+#     sbatch --export=ALL,SEED=0 jobs/train_detach.job
+#
+# Each train_*.job is a SLURM array; this script fires sbatch for each phase
+# once per seed in $SEEDS. Default 3 seeds gives error bars on every cell.
 #
 # Run from the login node:
 #     bash jobs/launch_all.sh
-#     bash jobs/launch_all.sh phase1                # baseline + variants only
-#     bash jobs/launch_all.sh phase2                # ablations using BEST_VARIANT
-#     bash jobs/launch_all.sh phase3                # ood + gwxsync
-#     bash jobs/launch_all.sh all                   # default: everything
+#     bash jobs/launch_all.sh phase1
+#     SEEDS="0 1 2" BEST_VARIANT=projected bash jobs/launch_all.sh phase2
 #
 # Override defaults via env vars:
-#     ITERS=100000 MODEL=small_16k LAMBDA=0.005 BEST_VARIANT=projected \
-#         bash jobs/launch_all.sh phase2
+#     ITERS=100000 LAMBDA=0.005 BEST_VARIANT=projected SEEDS="0 1" \
+#         bash jobs/launch_all.sh all
 #
-# Re-submitting any of these auto-resumes from output/<exp_id>/<exp_id>_ckpt_last.pth
-# because exp_id is fixed per array index.
+# Re-submitting auto-resumes per (exp_id includes seed suffix), because
+# train_*.job appends _s${SEED} to exp_id.
 
 set -e
 
@@ -32,11 +39,12 @@ BEST_VARIANT="${BEST_VARIANT:-global}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE}}"
 COMPILE="${COMPILE:-False}"   # default False because sm_75 GPUs can't JIT bf16 kernels; flip to True if you secure Ampere+
+AC_WEIGHT="${AC_WEIGHT:-1e-2}"
+SEEDS="${SEEDS:-0 1 2}"
 
-EXPORT="ALL,ITERS=${ITERS},MODEL=${MODEL},LAMBDA=${LAMBDA},BEST_VARIANT=${BEST_VARIANT},BATCH_SIZE=${BATCH_SIZE},EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE},COMPILE=${COMPILE}"
-
-echo "== GW experiment launcher =="
+echo "== GW experiment launcher (slim) =="
 echo "phase           = $PHASE"
+echo "seeds           = $SEEDS"
 echo "ITERS           = $ITERS"
 echo "MODEL           = $MODEL"
 echo "LAMBDA          = $LAMBDA"
@@ -44,40 +52,45 @@ echo "BEST_VARIANT    = $BEST_VARIANT"
 echo "BATCH_SIZE      = $BATCH_SIZE"
 echo "EVAL_BATCH_SIZE = $EVAL_BATCH_SIZE"
 echo "COMPILE         = $COMPILE"
-echo "----------------------------"
+echo "AC_WEIGHT       = $AC_WEIGHT"
+echo "----------------------------------"
 
 submit() {
+    # submit <jobfile> <seed>
     local jobfile="$1"
-    echo "sbatch --export=${EXPORT} ${jobfile}"
-    sbatch --export="${EXPORT}" "${jobfile}"
+    local seed="$2"
+    local export_str="ALL,ITERS=${ITERS},MODEL=${MODEL},LAMBDA=${LAMBDA},BEST_VARIANT=${BEST_VARIANT},BATCH_SIZE=${BATCH_SIZE},EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE},COMPILE=${COMPILE},AC_WEIGHT=${AC_WEIGHT},SEED=${seed}"
+    echo "sbatch --export=${export_str} ${jobfile}"
+    sbatch --export="${export_str}" "${jobfile}"
+}
+
+submit_phase1() {
+    for s in $SEEDS; do
+        submit jobs/train_baseline.job "$s"
+        submit jobs/train_variants.job "$s"
+    done
+}
+
+submit_phase2() {
+    for s in $SEEDS; do
+        submit jobs/train_lambda.job "$s"
+    done
+}
+
+submit_phase3() {
+    for s in $SEEDS; do
+        submit jobs/train_ood.job "$s"
+    done
 }
 
 case "$PHASE" in
-    phase1)
-        # E1 + E2: pick a winning variant before running the rest.
-        submit jobs/train_baseline.job
-        submit jobs/train_variants.job
-        ;;
-    phase2)
-        # E3 + E4 + E5: ablate the chosen variant.
-        # Pass BEST_VARIANT=<winner> in the env once you know it.
-        submit jobs/train_lambda.job
-        submit jobs/train_detach.job
-        submit jobs/train_schedule.job
-        ;;
-    phase3)
-        # E6 + E8: harder generalization / interaction tests.
-        submit jobs/train_ood.job
-        submit jobs/train_gwxsync.job
-        ;;
+    phase1) submit_phase1 ;;
+    phase2) submit_phase2 ;;
+    phase3) submit_phase3 ;;
     all)
-        submit jobs/train_baseline.job
-        submit jobs/train_variants.job
-        submit jobs/train_lambda.job
-        submit jobs/train_detach.job
-        submit jobs/train_schedule.job
-        submit jobs/train_ood.job
-        submit jobs/train_gwxsync.job
+        submit_phase1
+        submit_phase2
+        submit_phase3
         ;;
     *)
         echo "Unknown phase: $PHASE  (use phase1 | phase2 | phase3 | all)"
@@ -85,7 +98,7 @@ case "$PHASE" in
         ;;
 esac
 
-echo "----------------------------"
+echo "----------------------------------"
 echo "Done submitting. Watch the queue with:"
 echo "    squeue -u \$USER"
 echo "Tail any run's log with:"

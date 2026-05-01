@@ -28,6 +28,29 @@ def _normalize_dist(D: Tensor) -> Tensor:
     return D / m
 
 
+def anticollapse_logdet(v: Tensor, eta: float = 1e-3) -> Tensor:
+    """Spectral anti-collapse penalty: ``-log det(K + eta * I)`` on the
+    centered Gram matrix ``K = (v - mean) (v - mean)^T / (B - 1)``.
+
+    Non-zero eigenvalues of the Gram matrix coincide with those of the
+    feature covariance (up to a (D-B)*log(eta) constant when D > B), so
+    using the (B, B) Gram is equivalent to the (D, D) covariance form
+    promised in the report and stays cheap when D >> B.
+
+    Rank-1 collapse drives all but one singular value to zero, sending the
+    penalty toward (B-1) * (-log eta) -- a large positive number that
+    repels the optimiser from the degenerate solution.
+    """
+    B = v.shape[0]
+    if B < 2:
+        return torch.zeros((), device=v.device, dtype=v.dtype)
+    v_c = v - v.mean(dim=0, keepdim=True)
+    K = (v_c @ v_c.transpose(0, 1)) / float(max(B - 1, 1))
+    K = K + eta * torch.eye(B, device=v.device, dtype=v.dtype)
+    _, logdet = torch.linalg.slogdet(K)
+    return -logdet
+
+
 def entropic_gw_loss(
     D_video: Tensor,
     D_audio: Tensor,
@@ -167,11 +190,22 @@ def compute_gw_regularization(
     epsilon: float = 0.1,
     alpha: float = 0.5,
     min_batch: int = 4,
-) -> tuple[Tensor, Optional[Tensor]]:
+    anticollapse_weight: float = 0.0,
+    anticollapse_eta: float = 1e-3,
+    anticollapse_target: str = "both",
+) -> tuple[Tensor, Optional[Tensor], Tensor]:
     """Compute GW loss over the subset of the batch that has real video features.
 
-    Returns (loss, T). Returns (zero, None) if the real-video subset is too small.
-    Runs in fp32 inside an autocast(enabled=False) block for numerical stability.
+    Returns (loss, T, anticollapse_term). Returns (zero, None, zero) if the
+    real-video subset is too small. Runs in fp32 inside an
+    autocast(enabled=False) block for numerical stability.
+
+    ``loss`` already includes ``anticollapse_weight * anticollapse_term``;
+    the third value is returned separately for logging.
+
+    The anti-collapse penalty is applied on the *non-detached* representations
+    so that gradient always reaches the learnable projector(s) -- otherwise
+    ``detach_video=True`` would defeat its purpose.
     """
     device = x1.device
     zero = torch.zeros((), device=device, dtype=torch.float32)
@@ -179,7 +213,7 @@ def compute_gw_regularization(
     # subset to real video samples
     idx = video_exist.nonzero(as_tuple=False).squeeze(-1)
     if idx.numel() < min_batch:
-        return zero, None
+        return zero, None, zero
 
     clip_sub = clip_f_raw.index_select(0, idx)
     x1_sub = x1.index_select(0, idx)
@@ -190,33 +224,42 @@ def compute_gw_regularization(
 
         v, a = _extract_representations(network, variant, clip_sub, x1_sub)
 
-        if detach_video:
-            v = v.detach()
+        # spectral anti-collapse penalty on the un-detached projector outputs
+        ac = zero
+        if anticollapse_weight > 0.0:
+            if anticollapse_target in ("video", "both"):
+                ac = ac + anticollapse_logdet(v, eta=anticollapse_eta)
+            if anticollapse_target in ("audio", "both"):
+                ac = ac + anticollapse_logdet(a, eta=anticollapse_eta)
 
-        D_v = _normalize_dist(pairwise_distances(v))
+        v_gw = v.detach() if detach_video else v
+
+        D_v = _normalize_dist(pairwise_distances(v_gw))
         D_a = _normalize_dist(pairwise_distances(a))
 
         if variant == "fused":
             # cosine-based cross-domain cost between projected reps of same pair
-            v_n = F.normalize(v, dim=-1)
+            v_n = F.normalize(v_gw, dim=-1)
             a_n = F.normalize(a, dim=-1)
             C_cross = 1.0 - v_n @ a_n.transpose(0, 1)
-            loss, T = fused_gw_loss(
+            gw_loss, T = fused_gw_loss(
                 D_v, D_a, C_cross,
                 alpha=alpha,
                 num_iter=num_sinkhorn_iter,
                 epsilon=epsilon,
             )
         else:
-            loss, T = entropic_gw_loss(
+            gw_loss, T = entropic_gw_loss(
                 D_v, D_a,
                 num_iter=num_sinkhorn_iter,
                 epsilon=epsilon,
             )
 
-        if not torch.isfinite(loss):
-            return zero, None
-    return loss, T
+        if not torch.isfinite(gw_loss) or not torch.isfinite(ac):
+            return zero, None, zero
+
+        loss = gw_loss + anticollapse_weight * ac
+    return loss, T, ac.detach()
 
 
 def lambda_schedule(step: int, *, base: float, warmup_steps: int, schedule: str,

@@ -47,6 +47,9 @@ source /opt/itu/easybuild/software/Miniconda3/25.5.1-1/etc/profile.d/conda.sh
 conda activate "$ENV_PATH"
 cd "$PROJECT_DIR"
 
+# --- 2b. Make `import mmaudio` work for src/ layout ---
+export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:${PYTHONPATH}}"
+
 # --- 3. Avoid `import torch` hang on shared FS ---
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 echo "Pre-warming torch import cache..."
@@ -87,7 +90,7 @@ if [ ! -f "output/${EXP_ID}/${EXP_ID}_ema_final.pth" ] && \
 fi
 
 # --- 7. Run ---
-OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=1 eval_run.py \
+OMP_NUM_THREADS=2 torchrun --standalone --nproc_per_node=1 "$PROJECT_DIR/src/eval_run.py" \
     exp_id="$EXP_ID" \
     model="$MODEL" \
     duration_s="$DURATION" \

@@ -69,6 +69,12 @@ gw_regularization:
   warmup_steps: 1000
   schedule: constant        # constant | linear_rampup | cosine_anneal
   save_couplings: false     # save T* during eval (used by analyze_couplings.py)
+  # spectral anti-collapse penalty -log det(Cov(v) + eta*I) on projector outputs
+  # (Gram-form, equivalent up to a constant). 0 disables; set ~1e-3-1e-2 to
+  # protect c_g / fused / large-lambda projected from rank-1 collapse.
+  anticollapse_weight: 0.0
+  anticollapse_eta: 1.0e-3
+  anticollapse_target: both # video | audio | both
 
 # checkpoint paths to external modules
 vae_16k_ckpt: ./ext_weights/v1-16.pth

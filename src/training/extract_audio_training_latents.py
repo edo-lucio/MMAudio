@@ -19,6 +19,7 @@ from mmaudio.data.extraction.wav_dataset import WavTextClipsDataset
 from mmaudio.ext.autoencoder import AutoEncoderModule
 from mmaudio.ext.mel_converter import get_mel_converter
 from mmaudio.utils.dist_utils import local_rank, world_size
+from mmaudio.utils.paths import repo_path
 
 log = logging.getLogger()
 
@@ -28,8 +29,8 @@ torch.backends.cudnn.allow_tf32 = True
 # 16k
 SAMPLE_RATE = 16_000
 NUM_SAMPLES = 16_000 * 8
-tod_vae_ckpt = './ext_weights/v1-16.pth'
-bigvgan_vocoder_ckpt = './ext_weights/best_netG.pt'
+tod_vae_ckpt = str(repo_path('ext_weights', 'v1-16.pth'))
+bigvgan_vocoder_ckpt = str(repo_path('ext_weights', 'best_netG.pt'))
 mode = '16k'
 
 # 44k
@@ -40,7 +41,7 @@ NOTE: 352800 (8*44100) is not divisible by (STFT hop size * VAE downsampling rat
 
 # SAMPLE_RATE = 44100
 # NUM_SAMPLES = 353280
-# tod_vae_ckpt = './ext_weights/v1-44.pth'
+# tod_vae_ckpt = str(repo_path('ext_weights', 'v1-44.pth'))
 # bigvgan_vocoder_ckpt = None
 # mode = '44k'
 
