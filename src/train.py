@@ -13,7 +13,7 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, open_dict
 from torch.distributed.elastic.multiprocessing.errors import record
 
-from mmaudio.data.data_setup import setup_training_datasets, setup_val_datasets
+from mmaudio.data_mod.data_setup import setup_training_datasets, setup_val_datasets
 from mmaudio.model.sequence_config import CONFIG_16K, CONFIG_44K
 from mmaudio.runner import Runner
 from mmaudio.sample import sample

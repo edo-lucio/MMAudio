@@ -10,7 +10,7 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
 from tqdm import tqdm
 
-from mmaudio.data.data_setup import setup_eval_dataset
+from mmaudio.data_mod.data_setup import setup_eval_dataset
 from mmaudio.eval_utils import ModelConfig, all_model_cfg, generate
 from mmaudio.model.flow_matching import FlowMatching
 from mmaudio.model.networks import MMAudio, get_my_mmaudio

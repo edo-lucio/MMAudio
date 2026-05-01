@@ -15,7 +15,7 @@ from pathlib import Path
 import torch
 from hydra import compose, initialize
 
-from mmaudio.data.extracted_vgg import ExtractedVGG
+from mmaudio.data_mod.extracted_vgg import ExtractedVGG
 from mmaudio.model.gw_regularization import _extract_representations
 from mmaudio.model.networks import get_my_mmaudio
 from mmaudio.model.sequence_config import CONFIG_16K

@@ -14,8 +14,8 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from mmaudio.data.data_setup import error_avoidance_collate
-from mmaudio.data.extraction.wav_dataset import WavTextClipsDataset
+from mmaudio.data_mod.data_setup import error_avoidance_collate
+from mmaudio.data_mod.extraction.wav_dataset import WavTextClipsDataset
 from mmaudio.ext.autoencoder import AutoEncoderModule
 from mmaudio.ext.mel_converter import get_mel_converter
 from mmaudio.utils.dist_utils import local_rank, world_size

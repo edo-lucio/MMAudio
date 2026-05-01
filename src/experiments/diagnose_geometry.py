@@ -31,7 +31,7 @@ import torch
 from hydra import compose, initialize
 from scipy.stats import kendalltau, pearsonr, spearmanr
 
-from mmaudio.data.extracted_vgg import ExtractedVGG
+from mmaudio.data_mod.extracted_vgg import ExtractedVGG
 from mmaudio.model.gw_regularization import (
     _extract_representations, _normalize_dist, compute_gw_regularization,
     entropic_gw_loss, fused_gw_loss, pairwise_distances,

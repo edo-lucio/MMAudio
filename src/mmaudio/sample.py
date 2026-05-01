@@ -9,7 +9,7 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, open_dict
 from tqdm import tqdm
 
-from mmaudio.data.data_setup import setup_test_datasets
+from mmaudio.data_mod.data_setup import setup_test_datasets
 from mmaudio.runner import Runner
 from mmaudio.utils.dist_utils import info_if_rank_zero
 from mmaudio.utils.logger import TensorboardLogger

@@ -9,7 +9,7 @@ from colorlog import ColoredFormatter
 from PIL import Image
 from torchvision.transforms import v2
 
-from mmaudio.data.av_utils import ImageInfo, VideoInfo, read_frames, reencode_with_audio
+from mmaudio.data_mod.av_utils import ImageInfo, VideoInfo, read_frames, reencode_with_audio
 from mmaudio.model.flow_matching import FlowMatching
 from mmaudio.model.networks import MMAudio
 from mmaudio.model.sequence_config import CONFIG_16K, CONFIG_44K, SequenceConfig

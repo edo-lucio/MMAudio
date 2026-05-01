@@ -12,8 +12,8 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from mmaudio.data.data_setup import error_avoidance_collate
-from mmaudio.data.extraction.vgg_sound import VGGSound
+from mmaudio.data_mod.data_setup import error_avoidance_collate
+from mmaudio.data_mod.extraction.vgg_sound import VGGSound
 from mmaudio.model.utils.features_utils import FeaturesUtils
 from mmaudio.utils.dist_utils import local_rank, world_size
 from mmaudio.utils.paths import repo_path

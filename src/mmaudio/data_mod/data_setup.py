@@ -9,11 +9,11 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.dataloader import default_collate
 from torch.utils.data.distributed import DistributedSampler
 
-from mmaudio.data.eval.audiocaps import AudioCapsData
-from mmaudio.data.eval.video_dataset import MovieGen, VGGSound
-from mmaudio.data.extracted_audio import ExtractedAudio
-from mmaudio.data.extracted_vgg import ExtractedVGG
-from mmaudio.data.mm_dataset import MultiModalDataset
+from mmaudio.data_mod.eval.audiocaps import AudioCapsData
+from mmaudio.data_mod.eval.video_dataset import MovieGen, VGGSound
+from mmaudio.data_mod.extracted_audio import ExtractedAudio
+from mmaudio.data_mod.extracted_vgg import ExtractedVGG
+from mmaudio.data_mod.mm_dataset import MultiModalDataset
 from mmaudio.model.sequence_config import CONFIG_16K, CONFIG_44K
 from mmaudio.utils.dist_utils import local_rank
 

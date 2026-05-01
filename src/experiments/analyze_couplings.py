@@ -22,7 +22,7 @@ import torch
 from hydra import compose, initialize
 from omegaconf import OmegaConf
 
-from mmaudio.data.extracted_vgg import ExtractedVGG
+from mmaudio.data_mod.extracted_vgg import ExtractedVGG
 from mmaudio.model.gw_regularization import compute_gw_regularization
 from mmaudio.model.networks import get_my_mmaudio
 from mmaudio.model.sequence_config import CONFIG_16K
