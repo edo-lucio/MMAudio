@@ -53,4 +53,7 @@ dependencies = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["mmaudio"]
+packages = ["src/mmaudio"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = ""
