@@ -23,7 +23,7 @@ eval_extract_batch_size: 4
 weights: null
 checkpoint: null
 seed: 14159265
-num_workers: 10 # per-GPU
+num_workers: 2 # per-GPU
 pin_memory: False # set to True if your system can handle it, i.e., have enough memory
 
 # NOTE: This DOSE NOT affect the model during inference in any way
