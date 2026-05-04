@@ -22,6 +22,15 @@ def pairwise_distances(X: Tensor) -> Tensor:
     return D.clamp_min(0.0)
 
 
+def batched_pairwise_distances(X: Tensor) -> Tensor:
+    """Squared L2 pairwise distance matrix, vectorised over a leading batch dim.
+    X: (B, k, D) -> (B, k, k)
+    """
+    sq = (X * X).sum(-1, keepdim=True)  # (B, k, 1)
+    D = sq + sq.transpose(1, 2) - 2.0 * torch.bmm(X, X.transpose(1, 2))
+    return D.clamp_min(0.0)
+
+
 def _normalize_dist(D: Tensor) -> Tensor:
     # scale-invariance: divide by mean to avoid lambda_gw having to track feature magnitudes
     m = D.mean().detach().clamp_min(1e-8)
@@ -145,6 +154,60 @@ def fused_gw_loss(
     return loss, T
 
 
+def fused_got_loss(
+    D_x: Tensor,
+    D_y: Tensor,
+    C_xy: Tensor,
+    alpha: float = 0.5,
+    num_iter: int = 5,
+    epsilon: float = 0.1,
+    inner_sinkhorn_iter: int = 20,
+) -> tuple[Tensor, Tensor]:
+    """Fused-GW with a single shared transport plan, vectorised over a batch
+    dim and supporting non-square couplings.
+
+    Implements eq. (6)/(8) of Chen et al. 2020, "Graph Optimal Transport for
+    Cross-Domain Alignment" (ICML), generalised to per-sample token graphs:
+    each item carries an n-node graph on one side and an m-node graph on the
+    other, and one shared T:(B,n,m) is solved by Sinkhorn on the unified cost.
+
+    Shapes:
+      D_x:  (B, n, n) intra-domain distances on side x
+      D_y:  (B, m, m) intra-domain distances on side y
+      C_xy: (B, n, m) cross-domain pointwise cost (e.g. cosine distance)
+    Returns (mean-over-batch loss, final T).
+    """
+    Bsz, n, _ = D_x.shape
+    m = D_y.shape[1]
+    device, dtype = D_x.device, D_x.dtype
+
+    p = torch.full((Bsz, n, 1), 1.0 / n, device=device, dtype=dtype)
+    q = torch.full((Bsz, m, 1), 1.0 / m, device=device, dtype=dtype)
+    T = p * q.transpose(1, 2)  # (B, n, m)
+
+    for _ in range(num_iter):
+        G_gw = -2.0 * torch.bmm(torch.bmm(D_x, T), D_y)
+        G = alpha * G_gw + (1.0 - alpha) * C_xy
+        logK = -G / epsilon
+        logK = logK - logK.amax(dim=(1, 2), keepdim=True)
+        K = torch.exp(logK)  # (B, n, m)
+        u = torch.ones(Bsz, n, 1, device=device, dtype=dtype)
+        v = torch.ones(Bsz, m, 1, device=device, dtype=dtype)
+        for _ in range(inner_sinkhorn_iter):
+            u = p / (torch.bmm(K, v) + 1e-8)
+            v = q / (torch.bmm(K.transpose(1, 2), u) + 1e-8)
+        T = u * K * v.transpose(1, 2)
+
+    pp = p * p.transpose(1, 2)  # (B, n, n)
+    qq = q * q.transpose(1, 2)  # (B, m, m)
+    gw = ((D_x * D_x) * pp).sum(dim=(1, 2)) \
+        + ((D_y * D_y) * qq).sum(dim=(1, 2)) \
+        - 2.0 * (torch.bmm(torch.bmm(D_x, T), D_y) * T).sum(dim=(1, 2))
+    w = (C_xy * T).sum(dim=(1, 2))
+    per_sample = alpha * gw + (1.0 - alpha) * w
+    return per_sample.mean(), T
+
+
 def _extract_representations(
     network,
     variant: str,
@@ -221,6 +284,36 @@ def compute_gw_regularization(
     with torch.cuda.amp.autocast(enabled=False):
         clip_sub = clip_sub.float()
         x1_sub = x1_sub.float()
+
+        # got_token: per-sample fused-GW on post-projection token graphs
+        # (Chen et al. 2020, GOT). Aligns intra-video token relations to
+        # intra-audio token relations *within each sample*, with one shared T.
+        if variant == "got_token":
+            v_tok = network.clip_input_proj(clip_sub)         # (B, n, D)
+            a_tok = network.audio_input_proj(x1_sub)          # (B, m, D)
+            if detach_video:
+                v_tok = v_tok.detach()
+
+            D_x = batched_pairwise_distances(v_tok)
+            D_y = batched_pairwise_distances(a_tok)
+            # per-sample mean normalisation -> lambda_gw is scale-invariant
+            D_x = D_x / D_x.mean(dim=(1, 2), keepdim=True).detach().clamp_min(1e-8)
+            D_y = D_y / D_y.mean(dim=(1, 2), keepdim=True).detach().clamp_min(1e-8)
+            v_n = F.normalize(v_tok, dim=-1)
+            a_n = F.normalize(a_tok, dim=-1)
+            C_xy = 1.0 - torch.bmm(v_n, a_n.transpose(1, 2))  # (B, n, m)
+
+            gw_loss, T = fused_got_loss(
+                D_x, D_y, C_xy,
+                alpha=alpha,
+                num_iter=num_sinkhorn_iter,
+                epsilon=epsilon,
+            )
+            if not torch.isfinite(gw_loss):
+                return zero, None, zero
+            # anti-collapse not applied: token graphs don't suffer the
+            # rank-1 batch collapse the penalty was designed to repel.
+            return gw_loss, T, zero
 
         v, a = _extract_representations(network, variant, clip_sub, x1_sub)
 

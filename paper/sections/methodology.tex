@@ -1,5 +1,601 @@
 \section{Methodology}
+\label{sec:methodology}
 
-% TODO: drafted by /write_section with topic="methodology for <method>"
-%       Every methodological claim must trace back to a path/to/file.py:line
-%       in [CODE_FINDINGS] (cite as `% code-ref:` comment).
+This section formalises the integration of a Gromov--Wasserstein
+regularizer into a conditional flow-matching objective. We first
+recall the flow-matching loss as instantiated in MMAudio
+\citep{cheng_2025_mmaudio}, then define the four families of
+intra-modal pairwise-distance matrices that feed the regularizer,
+the entropic and fused-entropic Gromov--Wasserstein objectives, the
+Sinkhorn solver used to evaluate them, and the schedule that
+controls their contribution to training. Throughout, we treat
+MMAudio purely as a conditioning architecture: a means of
+materialising a video-conditioned generative process whose
+representations the GW loss can shape. The thesis claim is about
+the regularizer; the backbone is a substrate.
+
+\subsection{Backbone objective: conditional flow matching}
+\label{sec:methodology:fm}
+
+\paragraph{From CNFs to flow matching.}
+A continuous normalising flow (CNF) parameterises a generative model
+as the time-1 map of an ordinary differential equation
+$\dot x_t = v_\theta(t, x_t)$, transporting samples
+$x_0 \sim p_0$ from a tractable source (typically
+$p_0 = \mathcal{N}(0, I)$) to samples $x_1 \sim p_1$ from the data
+distribution. Classical maximum-likelihood training of CNFs
+requires backpropagating through an ODE solver, which is
+prohibitively expensive at the scales of interest here. Flow
+matching \citep{lipman_2023_flow}, developed concurrently as
+*stochastic interpolants*
+\citep{albergo_2023_building, albergo_2023_stochastic}, sidesteps
+this cost: rather than maximising the likelihood induced by the
+ODE, one fixes a *conditional probability path*
+$p_t(x \mid x_1)$ between $p_0$ and $p_1$, derives its target
+velocity field $u_t(x \mid x_1)$ in closed form, and trains
+$v_\theta$ by direct $L_2$ regression onto the target. Training is
+then *simulation-free*: each gradient step only requires sampling
+$(t, x_0, x_1)$ and a single forward pass through $v_\theta$, with
+no SDE or ODE integration in the loop. Inference still solves an
+ODE, but only at sampling time.
+
+\paragraph{The OT / linear path.}
+Among admissible probability paths, the one induced by
+optimal-transport displacement interpolation between $p_0$ and a
+single data point $x_1$ has a particularly simple form: the
+deterministic linear interpolation
+\begin{equation}
+  x_t \;=\; t\,x_1 + (1-t)\,x_0,
+  \qquad x_0 \sim \mathcal{N}(0, I), \;\; t \sim p_t,
+  \label{eq:fm_path}
+\end{equation}
+with the constant target velocity
+$u(x_t \mid x_0, x_1) = x_1 - x_0$. This linear path is the limit
+of the Gaussian-path family at zero variance and underlies the
+\emph{rectified flow} formulation of \citet{liu_2023_rectified};
+its straightness makes the learned ODE accurately integrable in
+few Euler steps. \citet{tong_2024_improving} extend the recipe to
+non-Gaussian sources by coupling $(x_0, x_1)$ with a minibatch OT
+plan, recovering the same loss with an empirically straighter
+flow. We adopt the simplest variant — Gaussian source, independent
+coupling, linear path — matching the rectified-flow choice of the
+backbone we build on.
+
+\paragraph{Conditional flow matching for V2A.}
+For video-conditioned audio generation, let
+$x_1 \in \R^{N \times d_a}$ denote a target audio latent of $N$
+tokens of dimension $d_a$ (in our default configuration $N=250$ at
+$31.25$ fps and $d_a=20$, the VAE latent space inherited from
+MMAudio's S-16kHz model). Let
+$\mathbf{C} = (F_v, F_{\mathrm{syn}}, F_t)$ collect the conditioning
+features extracted by frozen encoders: CLIP visual features $F_v$,
+Synchformer features $F_{\mathrm{syn}}$, and CLIP text features
+$F_t$. Conditional flow matching learns a time-dependent velocity
+field
+$v_\theta(t, \mathbf{C}, x_t) : [0,1] \times \R^{|\mathbf{C}|}
+\times \R^{N\times d_a} \to \R^{N \times d_a}$
+that pushes the Gaussian prior toward the data distribution along
+the linear path \eqref{eq:fm_path}, conditioned on $\mathbf{C}$.
+The flow-matching loss is then
+\begin{equation}
+  \LFM(\theta)
+  \;=\;
+  \E_{t, x_0, (x_1, \mathbf{C})}
+  \bigl\lVert v_\theta(t, \mathbf{C}, x_t) - (x_1 - x_0) \bigr\rVert^{2}.
+  \label{eq:fm_loss}
+\end{equation}
+Crucially, $\LFM$ is a \emph{token-wise} regression: the squared
+error is averaged independently over the $N$ audio tokens, and the
+target $x_1 - x_0$ for each token depends only on that token's
+noise sample. Cross-modal information enters exclusively through
+$\mathbf{C}$, and only via the learned velocity field. Whatever
+relational structure aligns the audio tokens to the video tokens
+must therefore be absorbed by $v_\theta$'s parameters --- there is
+no term in \eqref{eq:fm_loss} that explicitly compares the geometry
+of the two streams.
+
+\paragraph{The MMAudio realisation.}
+MMAudio \citep{cheng_2025_mmaudio} instantiates $v_\theta$ as a
+stack of $N_1$ multimodal MM-DiT blocks
+\citep{esser_2024_scaling} (visual / text / audio streams
+communicating via joint attention) followed by $N_2$ audio-only
+transformer blocks. Conditioning is injected at two levels:
+adaptive layer-norm modulation by a global vector $c_g$ pooled
+from the projected visual and text features, and token-level
+modulation by a frame-aligned vector $c_f$ derived from
+$F_{\mathrm{syn}}$ at $24$ fps. It reaches state of the art among
+public V2A systems \citep{cheng_2025_mmaudio}, surpassing earlier
+flow-matching V2A work such as Frieren
+\citep{wang_2024_frieren} (channel-level fusion + reflow). None of
+these mechanisms align the pairwise relations among audio tokens
+to those among video tokens; each token of one stream is nudged
+toward the correct token of the other stream by attention and
+adaLN, but the geometry of the streams is left to emerge
+incidentally from the token-wise regression in \eqref{eq:fm_loss}.
+The regularizer below targets exactly this gap.
+
+\subsection{Representation variants and the relational signal}
+\label{sec:methodology:reps}
+
+For a mini-batch of size $B$, write
+$F_v^{(b)} \in \R^{n_v \times d_v}$ for the raw CLIP feature
+sequence of sample $b$ (with $n_v$ visual tokens of dimension
+$d_v=1024$) and $x_1^{(b)} \in \R^{N \times d_a}$ for the
+corresponding audio latent. The regularizer takes as input two
+families of squared-Euclidean intra-modal distance matrices, one
+per side. We expose four ways of constructing them, each
+corresponding to a different geometric hypothesis about \emph{which}
+representations should align relationally.
+
+The first three variants compress each token sequence into a single
+vector and compute pairwise distances \emph{across} the batch,
+yielding $B \times B$ matrices $\DV, \DA \in \R^{B \times B}$. The
+fourth keeps token sequences intact and computes pairwise distances
+\emph{within} each sample, yielding per-sample $n \times n$ and
+$m \times m$ matrices. Concretely:
+
+\begin{description}
+  \item[\texttt{global}] uses pre-projection averages
+    $\bar v^{(b)} = \tfrac{1}{n_v}\sum_i F_v^{(b),i}$ and
+    $\bar x^{(b)} = \tfrac{1}{N}\sum_i x_1^{(b),i}$. This probes
+    whether the raw encoder geometry already carries cross-modal
+    relational structure, before any of MMAudio's learnable
+    parameters intervene.
+  \item[\texttt{projected}] passes the raw features through
+    MMAudio's input projection layers $\pi_v, \pi_a$ before
+    averaging:
+    $\tilde v^{(b)} = \tfrac{1}{n_v}\sum_i \pi_v(F_v^{(b)})_i$,
+    analogously for audio. The relational signal now back-propagates
+    into $\pi_v$ and $\pi_a$, the first learnable layers the GW
+    objective can reshape.
+  \item[\texttt{c\_g}] uses the same audio side as
+    \texttt{projected} but, on the video side, applies the global
+    conditioning projection
+    $c_g^{(b)} = \pi_g\bigl(\tfrac{1}{n_v}\sum_i \pi_v(F_v^{(b)})_i\bigr)$,
+    i.e.\ the very vector that drives MMAudio's adaLN modulation.
+    Aligning the geometry of $c_g$ to the audio geometry directly
+    targets the conditioning signal that already flows through every
+    transformer block.
+  \item[\texttt{fused}] uses the same averaged projected
+    representations as \texttt{projected}, but couples the GW
+    objective to a Wasserstein term on the cross-modal cosine
+    distance, yielding a fused-Gromov--Wasserstein loss in the
+    sense of \citet{vayer_2019_optimal,vayer_2019_fused}. The
+    transport plan is shared between the two terms, in the manner
+    of \citet{chen_2020_graph}.
+  \item[\texttt{got\_token}] keeps the per-sample token graphs.
+    For each sample $b$ we form
+    $D_{\mathrm{V}}^{(b)} \in \R^{n_v \times n_v}$ from the
+    projected visual tokens and
+    $D_{\mathrm{A}}^{(b)} \in \R^{N \times N}$ from the projected
+    audio tokens, with a per-sample cross-modal cost
+    $C_{\mathrm{xy}}^{(b)} \in \R^{n_v \times N}$, and solve a
+    fused-GW problem \emph{per sample}. This is the formulation
+    closest in spirit to GOT \citep{chen_2020_graph}, lifted from
+    image--text token sets to per-sample video / audio token sets.
+\end{description}
+
+For all variants, raw squared distances $D$ are normalised by
+their mean,
+\begin{equation}
+  \widehat D \;=\; D \,/\, \overline{D},
+  \qquad
+  \overline{D} \;=\; \mathrm{mean}(D),
+  \label{eq:dist_normalisation}
+\end{equation}
+with the divisor detached from the autograd graph. This makes the
+regularizer scale-invariant in the sense that multiplying any
+representation by a constant leaves $\widehat D$ unchanged, which in
+turn makes the trade-off coefficient $\lambda_{\mathrm{GW}}$
+introduced in \S\ref{sec:methodology:training} comparable across
+variants and across training steps even as feature magnitudes
+drift.
+
+\subsection{Entropic Gromov--Wasserstein}
+\label{sec:methodology:egw}
+
+Let $\widehat\DV, \widehat\DA \in \R^{B \times B}$ denote the
+normalised intra-video and intra-audio distance matrices for one of
+the cross-batch variants above, and equip both sides with the
+uniform marginal
+$p = q = \tfrac{1}{B}\mathbf{1}_B$. The quadratic
+Gromov--Wasserstein discrepancy with squared cost is
+\begin{equation}
+  \mathrm{GW}^{2}(\widehat\DV, \widehat\DA, p, q)
+  \;=\;
+  \min_{T \in \Pi(p,q)}
+  \sum_{i,j,k,l}
+  \bigl(\widehat\DV_{ik} - \widehat\DA_{jl}\bigr)^{2}
+  \, T_{ij} T_{kl},
+  \label{eq:gw}
+\end{equation}
+where $\Pi(p,q) = \{T \in \R_{\geq 0}^{B \times B} :
+T \mathbf{1}_B = p,\, T^{\!\top}\!\mathbf{1}_B = q\}$. Equation
+\eqref{eq:gw} is a quadratic assignment problem and NP-hard in
+general; following \citet{peyre_2016_gromov} and
+\citet{solomon_2016_entropic} we work with its entropic relaxation
+\begin{equation}
+  \mathrm{EGW}_\varepsilon
+  \;=\;
+  \min_{T \in \Pi(p,q)}
+  \;\bigl\langle L(\widehat\DV, \widehat\DA) \otimes T,\, T\bigr\rangle
+  \;-\; \varepsilon\, H(T),
+  \label{eq:egw}
+\end{equation}
+with $L(\widehat\DV, \widehat\DA)_{ijkl} = (\widehat\DV_{ik} -
+\widehat\DA_{jl})^{2}$ and $H(T) = -\sum_{ij} T_{ij}(\log T_{ij} -
+1)$ the discrete entropy. The entropic relaxation is convex in $T$
+\emph{conditional on the linearisation around the current iterate},
+and admits the Sinkhorn-iteration solver below; its statistical
+behaviour at finite $B$ is governed by the parametric
+$B^{-1/2}$ rate of \citet{zhang_2024_gromov} and the convergence
+guarantees of \citet{rioux_2023_entropic}, neither of which holds
+for the un-regularised problem.
+
+\paragraph{Mirror-descent Sinkhorn solver.}
+The entropic-GW solver follows the mirror-descent / Frank--Wolfe
+recipe of \citet{peyre_2016_gromov} (introduced for GW barycenter
+computation) and \citet{solomon_2016_entropic} (provably
+convergent on entropic-GW correspondence problems). The idea is
+to alternate two cheap steps: a \emph{linearisation} of the
+quartic GW interaction around the current plan, and a single
+\emph{entropic optimal-transport projection} onto the marginal
+polytope solved by Sinkhorn iteration.
+
+For squared cost the GW objective in \eqref{eq:gw} admits the
+linearised gradient
+\begin{equation}
+  G(T) \;=\; -2\, \widehat\DV \, T \, \widehat\DA
+  \;\;+\;\; \text{constants independent of } T,
+  \label{eq:gw_gradient}
+\end{equation}
+since
+$\partial / \partial T \bigl\langle L(\widehat\DV, \widehat\DA)
+\otimes T, T\bigr\rangle = 2 (\widehat\DV^{2} p \mathbf{1}^{\!\top}
++ \mathbf{1} q^{\!\top} \widehat\DA^{2}) - 2 \widehat\DV T
+\widehat\DA$, and the marginal-dependent terms are constant under
+fixed $p, q$. At each outer iteration we therefore solve an
+entropic optimal transport problem with cost matrix $G(T)$, that is,
+\begin{equation}
+  T^{+}
+  \;=\;
+  \arg\min_{T' \in \Pi(p,q)}
+  \langle G(T), T'\rangle - \varepsilon H(T'),
+  \label{eq:inner_eot}
+\end{equation}
+whose solution has the Gibbs form $T^{+}_{ij} = u_i K_{ij} v_j$
+with $K = \exp(-G(T)/\varepsilon)$, and $u, v$ are recovered by the
+Sinkhorn fixed-point recursion
+\begin{equation}
+  u \leftarrow p \,/\, (K v),
+  \qquad
+  v \leftarrow q \,/\, (K^{\!\top} u),
+  \label{eq:sinkhorn}
+\end{equation}
+iterated until the marginals match to a tolerance fixed by the
+inner iteration count. The recursion is the standard Bregman /
+matrix-scaling iteration that defines the entropic-OT solution
+and inherits its linear convergence in the marginal-error
+metric; we treat its hyperparameters
+(\texttt{inner\_sinkhorn\_iter}, $\varepsilon$) as fixed budgets
+rather than tuning to a stopping criterion. Convergence of the
+overall outer-inner scheme on entropic GW with quadratic cost is
+guaranteed by \citet{rioux_2023_entropic}, who prove
+that the entropic-GW objective is convex in the linearised
+regime and admits provable rates --- the theoretical underpinning
+that justifies running only a small number of outer steps in
+practice.
+
+We run \texttt{num\_sinkhorn\_iter}$=5$ outer mirror-descent
+steps, each containing \texttt{inner\_sinkhorn\_iter}$=20$
+Sinkhorn passes, with $\varepsilon = 0.1$, and we stabilise the
+kernel with the standard log-sum-exp shift
+$K = \exp(-G/\varepsilon - \max(-G/\varepsilon))$ that
+\citet{feydy_2019_interpolating} popularised in their
+GPU-friendly Sinkhorn implementation. The full computation is
+wrapped in an \texttt{autocast(enabled=False)} block so that the
+entire solver runs in \texttt{float32}, which we found necessary
+to avoid overflow in $K$ when $\varepsilon$ is small or distances
+are poorly scaled --- a known sensitivity of entropic-OT solvers
+addressed in the same line of work
+\citep{feydy_2019_interpolating, rioux_2023_entropic}.
+
+\paragraph{Loss value.}
+At the converged plan $T^{\star}$ we report the full quadratic
+objective rather than the linearised gradient. With uniform
+marginals the squared-cost expansion reads
+\begin{equation}
+  \LGW
+  \;=\;
+  \langle \widehat\DV^{\odot 2}, p p^{\!\top} \rangle
+  \;+\;
+  \langle \widehat\DA^{\odot 2}, q q^{\!\top} \rangle
+  \;-\;
+  2\,\langle \widehat\DV\, T^{\star}\, \widehat\DA,\, T^{\star} \rangle,
+  \label{eq:gw_value}
+\end{equation}
+where $D^{\odot 2}$ denotes element-wise square. The first two
+terms are constants in $T^{\star}$ but vary across mini-batches and
+across training steps; reporting them keeps loss magnitudes
+comparable across the four variants.
+
+\subsection{Fused Gromov--Wasserstein}
+\label{sec:methodology:fgw}
+
+For the \texttt{fused} and \texttt{got\_token} variants we add a
+linear (Wasserstein) cross-modal term and share a single transport
+plan between the two contributions, following GOT
+\citep{chen_2020_graph} and the FGW formulation of
+\citet{vayer_2019_optimal, vayer_2019_fused}.
+
+\paragraph{Cross-modal cosine cost.}
+The pure-GW objective \eqref{eq:gw_value} compares
+\emph{intra-modal pairwise distances} only; it is invariant to any
+isometric reparametrisation of either modality, including
+arbitrary global rotations or reflections. The fused term breaks
+this invariance by re-introducing a direct video-to-audio
+\emph{pointwise} comparison through the cross-modal cost matrix
+$C_{\mathrm{xy}}$. Concretely, write
+$\tilde v, \tilde a \in \R^{\bullet \times d}$ for the projected
+representations on the video and audio sides --- where $\bullet$
+is the batch index $b \in \{1,\dots,B\}$ for the cross-batch
+\texttt{fused} variant, and the within-sample token index for
+\texttt{got\_token}. We first $L_2$-normalise each row so that
+every representation lies on the unit sphere of $\R^d$,
+\begin{equation}
+  \hat v_i \;=\; \tilde v_i \,/\, \lVert \tilde v_i \rVert_2,
+  \qquad
+  \hat a_j \;=\; \tilde a_j \,/\, \lVert \tilde a_j \rVert_2,
+  \label{eq:l2norm}
+\end{equation}
+and then compute the matrix of pairwise cosine \emph{distances}
+\begin{equation}
+  \bigl[C_{\mathrm{xy}}\bigr]_{ij}
+  \;=\;
+  1 \;-\; \hat v_i^{\!\top} \hat a_j
+  \;\in\; [0, 2].
+  \label{eq:ccross}
+\end{equation}
+For the cross-batch \texttt{fused} variant this yields
+$C_{\mathrm{xy}} \in \R^{B \times B}$ whose diagonal entries are
+the cosine distances between the projected video and audio
+representations of the \emph{same} sample $b$ --- the natural
+"pointwise" cost that an OT plan with diagonal mass would pay zero
+under perfect cross-modal feature alignment. For
+\texttt{got\_token} the same construction is performed
+\emph{within each sample} on the projected token sequences,
+yielding a per-sample $C_{\mathrm{xy}}^{(b)} \in \R^{n \times m}$
+that compares each video token to each audio token of the same
+clip. Three choices deserve note. (i) The cosine form is preferred
+to a Euclidean distance because $\tilde v$ and $\tilde a$ live in
+different feature spaces with potentially very different scales:
+normalising to the unit sphere removes the scale ambiguity and
+keeps $C_{\mathrm{xy}} \in [0, 2]$ for any $d$ and any feature
+magnitude, so $C_{\mathrm{xy}}$ and the mean-normalised intra-modal
+costs $\widehat\DV, \widehat\DA$ live on comparable scales without
+further rescaling. (ii) The construction reuses the projection
+layers $\pi_v, \pi_a$ that already produce the intra-modal
+representations, so the FGW objective adds no new learnable
+parameters: the same projector outputs feed the GW and Wasserstein
+terms, ensuring they pull on the same representation rather than on
+two disjoint heads. (iii) The video side of $C_{\mathrm{xy}}$
+inherits the asymmetric \texttt{detach\_video} treatment of
+\S\ref{sec:methodology:training}, so the Wasserstein term too acts
+as a one-way pressure on the audio representation.
+
+\paragraph{Linearised gradient and loss.}
+With $C_{\mathrm{xy}}$ in hand and mixing parameter
+$\alpha \in [0,1]$, the linearised gradient at iterate $T$ becomes
+\begin{equation}
+  G_{\mathrm{FGW}}(T)
+  \;=\;
+  \alpha \cdot \bigl(-2\, \widehat\DV \, T \, \widehat\DA\bigr)
+  \;+\;
+  (1 - \alpha) \cdot C_{\mathrm{xy}},
+  \label{eq:fgw_gradient}
+\end{equation}
+plugged into the same inner entropic-OT solve
+\eqref{eq:inner_eot}--\eqref{eq:sinkhorn}. The reported loss is
+the same convex combination evaluated at $T^{\star}$,
+\begin{equation}
+  \LFGW
+  \;=\;
+  \alpha \cdot \LGW(T^{\star})
+  \;+\;
+  (1 - \alpha) \cdot \langle C_{\mathrm{xy}},\, T^{\star} \rangle.
+  \label{eq:fgw_value}
+\end{equation}
+\textit{Sharing} the plan across the two terms is non-trivial: it
+forces the Wasserstein and Gromov--Wasserstein contributions to
+agree on a single coupling, rather than letting each pull the
+representations toward its own optimum. \citet{chen_2020_graph}
+report empirically that the shared-plan variant outperforms two
+independent plans on every cross-domain task they examine; we
+adopt the same design.
+
+\subsection{Anti-collapse penalty}
+\label{sec:methodology:anticollapse}
+
+A practical risk of pure GW alignment between cross-batch
+representations is that the projector(s) collapse the batch onto
+a single direction, sending $\widehat\DV$ and $\widehat\DA$ both
+toward zero and trivially minimising \eqref{eq:gw_value}. This is
+a structural pathology of any similarity-driven objective with a
+learnable feature extractor and no negative-pair pressure --- the
+same failure mode that motivated the design of non-contrastive
+self-supervised methods such as Barlow Twins
+\citep{zbontar_2021_barlow} (cross-correlation matrix toward
+identity), VICReg \citep{bardes_2022_vicreg} (per-dimension
+variance and off-diagonal covariance penalties), and W-MSE
+\citep{ermolov_2021_whitening} (hard whitening of batch
+embeddings). At a higher level it also resembles the
+entropic-bias collapse of plain entropic-OT losses that motivated
+the Sinkhorn-divergence construction of
+\citet{feydy_2019_interpolating}. We adopt the **spectral
+log-determinant** form of the regularizer, introduced by
+\citet{ozsoy_2022_corinfomax} as the second-order
+mutual-information surrogate underlying the CorInfoMax objective.
+Concretely, we add a spectral penalty on the centred Gram matrix
+\begin{equation}
+  K(v) \;=\; \frac{1}{B-1}\,\bigl(v - \bar v\bigr)\bigl(v - \bar v\bigr)^{\!\top}
+  \;\in\; \R^{B \times B},
+  \label{eq:gram}
+\end{equation}
+where $v \in \R^{B \times d}$ stacks the batch representations,
+and define
+\begin{equation}
+  \mathcal{L}_{\mathrm{AC}}(v)
+  \;=\;
+  -\log\det\bigl(K(v) + \eta I_B\bigr).
+  \label{eq:anticollapse}
+\end{equation}
+The non-zero spectrum of the Gram $K(v)$ coincides with that of the
+$d \times d$ feature covariance up to the $(d - B)\log\eta$
+constant when $d > B$, so the Gram form is computationally
+preferable when $d \gg B$ but penalises the same rank deficiency
+as the covariance form of \citet{ozsoy_2022_corinfomax}.
+A rank-1 collapse drives $B-1$ eigenvalues of $K$ to zero, sending
+\eqref{eq:anticollapse} toward $(B-1)\,(-\log\eta)$ — a large
+positive number that repels the optimiser. Compared to VICReg's
+per-dimension variance hinge or Barlow Twins' off-diagonal squared
+penalty, the log-det form is a \emph{soft barrier on the joint
+spectrum} rather than a per-axis or per-pair constraint: it forbids
+rank deficiency without dictating the anisotropy of the surviving
+spectrum, which leaves the GW objective free to choose the
+direction of variation. This is the same trade-off that
+distinguishes soft whitening (CorInfoMax-style) from hard
+whitening (W-MSE-style \citep{ermolov_2021_whitening}); we prefer
+the soft form because the GW geometry is precisely what we want to
+shape, not constrain. Critically, the penalty is applied to the
+\emph{non-detached} representations, so its gradient always reaches
+the projector even when the GW term is computed with the video
+side detached (\S\ref{sec:methodology:training}).
+
+\subsection{Training integration and the \texorpdfstring{$\lambda_{\mathrm{GW}}$}{lambda\_GW} schedule}
+\label{sec:methodology:training}
+
+The total loss optimised at training step $s$ is
+\begin{equation}
+  \mathcal{L}_{\mathrm{total}}(\theta; s)
+  \;=\;
+  \LFM(\theta)
+  \;+\;
+  \lambda_{\mathrm{GW}}(s) \cdot \mathcal{L}_{\mathrm{rel}}(\theta)
+  \;+\;
+  \lambda_{\mathrm{AC}} \cdot \mathcal{L}_{\mathrm{AC}}(\theta),
+  \label{eq:total_loss}
+\end{equation}
+where $\mathcal{L}_{\mathrm{rel}} \in \{\LGW, \LFGW\}$ is selected
+by the variant. Three implementation choices deserve emphasis.
+
+\paragraph{Subset selection.}
+The regularizer is computed only over the subset of the mini-batch
+for which a real video is present (\texttt{video\_exist} mask),
+since for audio-only samples MMAudio's own training procedure
+replaces the visual stream with learnable empty tokens; aligning
+audio geometry to the geometry of constants is meaningless. If
+fewer than \texttt{min\_batch}$=4$ real videos remain in the
+batch, the GW term is set to zero for that step.
+
+\paragraph{Asymmetric gradient flow.}
+By default we set \texttt{detach\_video}$=\mathtt{True}$, which
+stops the gradient on the video side of $\widehat\DV$ before the GW
+solver. The video encoder (CLIP / Synchformer) is frozen in any
+case, but the projection layers $\pi_v$ and $\pi_g$ are not, and
+without the detach the GW loss can satisfy itself by reshaping the
+visual conditioning rather than the audio representation. Detaching
+ensures that the GW term acts as a one-way pressure: the audio side
+is asked to mirror the video geometry, not the other way round.
+The anti-collapse penalty bypasses this detach so it can still
+discipline the projector outputs.
+
+\paragraph{Schedule.}
+The coefficient $\lambda_{\mathrm{GW}}(s)$ is governed by a small
+schedule family:
+\begin{equation}
+  \lambda_{\mathrm{GW}}(s)
+  \;=\;
+  \begin{cases}
+    \lambda_{0} \cdot s / s_{\mathrm{w}}
+      & \text{if } s < s_{\mathrm{w}} \;\text{and schedule}=\textsc{linear-rampup}, \\[2pt]
+    0
+      & \text{if } s < s_{\mathrm{w}} \;\text{and schedule}=\textsc{constant}, \\[2pt]
+    \lambda_{0}
+      & \text{if } s \geq s_{\mathrm{w}} \;\text{and schedule}\in\{\textsc{constant}, \textsc{linear-rampup}\}, \\[2pt]
+    \tfrac{\lambda_{0}}{2}\bigl(1 + \cos\bigl(\pi\,\tfrac{s - s_{\mathrm{w}}}{S - s_{\mathrm{w}}}\bigr)\bigr)
+      & \text{if } s \geq s_{\mathrm{w}} \;\text{and schedule}=\textsc{cosine-anneal},
+  \end{cases}
+  \label{eq:lambda_schedule}
+\end{equation}
+with base weight $\lambda_{0}$, warm-up length $s_{\mathrm{w}}$,
+and total training horizon $S$. The motivation is empirical and
+theoretical at once. Empirically: at initialisation the audio
+representation has not yet been shaped by the flow-matching loss,
+so its intra-batch geometry is essentially noise, and forcing it
+to match the video geometry from step zero pulls the network into
+degenerate solutions that satisfy the GW term at the cost of the
+generative objective. Theoretically: existing fused-OT work (e.g.\
+\citet{chen_2020_graph}) fixes the mixing $\alpha$ but not its
+relative weight against the task loss. The schedule
+\eqref{eq:lambda_schedule} resolves the latter dimension explicitly
+and is, to our knowledge, novel for OT-based cross-modal
+regularization.
+
+\subsection{Why this isolates the relational hypothesis}
+\label{sec:methodology:isolation}
+
+Three properties make the construction above a clean test of the
+thesis question. First, $\LFM$ in \eqref{eq:fm_loss} and the
+backbone of \citet{cheng_2025_mmaudio} together constitute a
+\emph{pointwise} alignment baseline: the generative target is
+defined token by token via the constant velocity $x_1 - x_0$, and
+all cross-modal information enters via mechanisms (joint attention,
+adaLN with $c_g$, frame-aligned $c_f$) that operate on individual
+tokens rather than on inter-token relations. The GW term
+\eqref{eq:gw_value} is the smallest principled addition that
+introduces an explicit \emph{relational} signal, because
+Gromov--Wasserstein is, by construction, the OT object that
+compares pairwise distance matrices rather than features.
+Improvements traceable to $\LGW$ can therefore be attributed to
+the relational signal specifically, rather than to extra capacity
+or extra supervision in some other form.
+
+Second, the four representation variants of
+\S\ref{sec:methodology:reps} disentangle \emph{where} in the
+network the relational signal is injected. \texttt{global}
+operates before any learnable layer and asks whether the encoder
+geometry already supports relational alignment without parameter
+updates; \texttt{projected} injects the signal into the input
+projections and lets it propagate through every transformer block;
+\texttt{c\_g} aligns the very vector that drives adaLN modulation;
+\texttt{fused} adds a Wasserstein term to test whether
+relational and pointwise signals are complementary at the same
+representation level; \texttt{got\_token} moves the GW objective
+from cross-batch geometry to within-sample token geometry,
+matching most closely the setting in which GW is typically deployed
+\citep{chen_2020_graph,vayer_2019_optimal}. The five variants are
+the five most natural injection points in MMAudio's
+information flow; the ablation is exhaustive at this granularity.
+
+Third, the schedule \eqref{eq:lambda_schedule} resolves a confound
+that prior fused-OT work leaves implicit: improvements (or
+regressions) cannot be attributed to a fortuitous choice of
+$\lambda$ if the same schedule is used across all variants, and
+ablating the schedule itself separates relational signal from
+training dynamics.
+
+The contribution of this chapter, relative to the upstream
+MMAudio repository, is therefore localised in three additions: a
+self-contained GW solver
+(\texttt{src/mmaudio/model/gw\_regularization.py}), the integration
+hook in the training loop that selects the active subset, applies
+the schedule, and combines the two losses, and the configuration
+surface (\texttt{config/base\_config.yaml::gw\_regularization}) that
+exposes the variant, the schedule, the entropic regularization
+$\varepsilon$, the FGW mixing $\alpha$, the detach flag, and the
+anti-collapse parameters as the axes of the empirical study in
+\S\ref{sec:results}. The flow-matching backbone, the encoders, the
+synchronization module, the data pipeline, and every other
+architectural choice are inherited unchanged from
+\citet{cheng_2025_mmaudio}; this isolates the regularizer as the
+single independent variable.

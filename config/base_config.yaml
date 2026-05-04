@@ -60,7 +60,7 @@ cfg_strength: 4.5
 # Gromov-Wasserstein regularization
 gw_regularization:
   enabled: false
-  variant: global           # global | projected | c_g | fused
+  variant: global           # global | projected | c_g | fused | got_token
   lambda_gw: 0.01
   num_sinkhorn_iter: 5
   epsilon: 0.1

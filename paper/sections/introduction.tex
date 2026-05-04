@@ -1,7 +1,138 @@
 \section{Introduction}
 
-% TODO: drafted by /write_section with topic="introduction"
-%       Motivate the pointwise-vs-relational alignment gap, position the
-%       Gromov-Wasserstein regularizer as the contribution, and forward-
-%       reference the design axes (D1--D5) and hypotheses (H1--H5) tested
-%       in the methodology and results.
+The preceding chapters of this thesis treated the Gromov--Wasserstein
+(GW) distance as an object of study in its own right: a geometry-aware
+divergence between metric--measure spaces \citep{memoli_2022_distance},
+solved either exactly or through its entropic relaxation
+\citep{peyre_2016_gromov, solomon_2016_entropic}, and used to align
+representations \emph{post hoc} without involving a learned model.
+This chapter changes the role of GW. Rather than measuring alignment
+between two fixed embedding sets, we ask whether the same quantity is
+useful as a \emph{differentiable regularizer} that shapes the
+representations of a deep generative model \emph{during training}.
+
+The setting we choose for this question is video-to-audio (V2A)
+generation with flow matching \citep{lipman_2023_flow,
+albergo_2023_building, liu_2023_rectified}, a now-standard
+simulation-free training objective for continuous normalizing flows
+that has rapidly become the dominant formulation for audio
+generation \citep{guan_2024_lafma, wang_2024_frieren,
+cheng_2025_mmaudio} and high-resolution multimodal synthesis
+\citep{esser_2024_scaling}. V2A is a stress test for cross-modal
+alignment: an audio waveform must be both \emph{semantically}
+consistent with what is happening on screen and \emph{temporally}
+synchronised with it. State-of-the-art V2A systems --- exemplified by MMAudio
+\citep{cheng_2025_mmaudio}, the open-source flow-matching backbone
+we build on --- handle this through a combination of pointwise
+mechanisms: joint multimodal attention over concatenated
+video/text/audio tokens, adaLN conditioning on a global vector $c_g$
+broadcast to all tokens, and a frame-aligned conditioning $c_f$
+driven by Synchformer features that modulates the audio stream
+token-by-token. These mechanisms align the two modalities
+\emph{point by point}: each audio token is pushed toward the video
+token it should attend to, but the \emph{relations among} the audio
+tokens are not explicitly required to mirror the relations among the
+video tokens. In the language of optimal transport, the
+training objective is shaped by Wasserstein-style (feature-level)
+signals while the Gromov--Wasserstein-style (relational) signal is
+left implicit, to be discovered by the network if and when it helps.
+
+Recent work in adjacent settings suggests this is a missed
+opportunity. \citet{chen_2020_graph} show that adding a joint
+Wasserstein + Gromov--Wasserstein loss as a drop-in regularizer ---
+sharing a single Sinkhorn-solved transport plan between the two
+terms, weighted by a single mixing coefficient $\lambda$ ---
+improves image--text retrieval, visual question answering, and
+machine translation over attention-only baselines, with their
+ablation favouring a relatively large weight on the Wasserstein term
+while the Gromov--Wasserstein term contributes the structural lift. \citet{lu_2025_crossmodal}
+report the same pattern when transferring linguistic knowledge into a
+CTC speech recogniser: the GW edge-matching term yields gains
+\emph{beyond} those of optimal-transport methods that match only
+features. \citet{chandra_2025_realign} push the recipe to long
+procedural videos and obtain double-digit F1 improvements over
+Kantorovich-OT baselines using a fused partial GW loss.
+\citet{gong_2022_gromov} go further still and show that pure GW
+suffices to align modalities even when no paired data are available,
+by matching their pairwise-distance structure alone.
+\citet{sasaki_2025_unsupervised} formalise this perspective for
+neuroscience and machine learning: GW recovers cross-system
+correspondences --- between brains, species, or networks ---
+that supervised representational similarity analysis flattens, because
+it is invariant to isometric reparametrisations of each side.
+
+What is conspicuously absent from this body of work is any use of GW
+inside a \emph{generative} V2A objective. Existing cross-modal GW
+results target discriminative tasks (retrieval, captioning, ASR,
+clustering) or self-supervised pretraining; the closest generative
+analogue we are aware of, \citet{wang_2024_inverse}'s
+inverse-OT framework for music-guided trailer generation, uses only
+the Wasserstein component. The question this chapter addresses is
+therefore concrete: \emph{can a Gromov--Wasserstein regularizer that
+aligns the relational geometry of video and audio embeddings improve
+flow-matching V2A generation, beyond what pointwise conditioning
+already achieves?}
+
+We answer the question by adding a GW penalty to the standard
+flow-matching loss of an open-source V2A backbone (MMAudio) trained on
+VGGSound. The penalty is computed per mini-batch from intra-video and
+intra-audio pairwise distance matrices and solved via the entropic
+Sinkhorn relaxation in fp32, following \citet{peyre_2016_gromov} and
+\citet{solomon_2016_entropic}. Two design choices distinguish our
+implementation from a naive port of off-the-shelf GW. First, we
+investigate four representation variants over which the pairwise
+distances are computed --- using global pooled features, a learned
+projection, the conditioning signal $c_g$, and a fused
+Wasserstein--GW objective in the spirit of \citet{vayer_2019_optimal,
+vayer_2019_fused}. Second, we schedule the regularization weight
+$\lambda_{\mathrm{GW}}$ during training rather than fixing it,
+allowing the relational signal to engage gradually as the
+flow-matching loss settles. The four representation variants map
+naturally onto MMAudio's existing conditioning signals: the
+\texttt{c\_g} variant computes pairwise distances over the global
+adaLN vector, \texttt{global} and \texttt{projected} act on the
+visual / audio token streams, and \texttt{fused} combines a
+Wasserstein term with the GW term in the spirit of GOT
+\citep{chen_2020_graph}, sharing a single Sinkhorn transport plan
+between the two.
+
+The use of entropic GW as a per-batch loss is justified by the
+recently established statistical theory:
+\citet{zhang_2024_gromov} show that entropic GW achieves the
+parametric $n^{-1/2}$ sample-complexity rate independent of the
+ambient dimension, and \citet{rioux_2023_entropic} prove convergence
+of the entropic-GW solver together with a central-limit theorem for
+the empirical estimator. The remaining design tension --- the cubic
+per-iteration cost of standard entropic-GW versus the linear-time
+low-rank variant of \citet{scetbon_2022_lineartime} or the sliced
+variant of \citet{vayer_2019_sliced}, and the equal-mass assumption
+versus the unbalanced formulation of \citet{sejourne_2021_unbalanced}
+--- is taken up in the methodology and discussion sections.
+
+Concretely, this chapter contributes:
+\begin{itemize}
+  \item the first integration, to our knowledge, of a
+        Gromov--Wasserstein regularizer into a flow-matching V2A
+        objective, building on the entropic GW machinery introduced
+        in earlier chapters;
+  \item a four-way ablation across representation variants
+        (\texttt{global}, \texttt{projected}, \texttt{c\_g},
+        \texttt{fused}) that isolates which embedding geometry
+        carries the cross-modal relational signal;
+  \item a schedule for $\lambda_{\mathrm{GW}}$ that resolves an
+        engineering question left open by prior fused-OT work, where
+        the trade-off parameter is typically held fixed;
+  \item an empirical evaluation on VGGSound that asks whether the
+        relational signal contributes any improvement on top of the
+        already strong pointwise conditioning of a modern V2A
+        backbone.
+\end{itemize}
+
+The remainder of this chapter is organised as follows. Section
+\ref{sec:related_work} situates the contribution among prior
+cross-modal OT/GW work and modern V2A systems. Section
+\ref{sec:methodology} introduces the flow-matching backbone, defines
+the four GW variants and the $\lambda_{\mathrm{GW}}$ schedule, and
+states the design axes (D1--D5) and hypotheses (H1--H5) that the
+experiments are built to test. Sections \ref{sec:results} and
+\ref{sec:discussion} report and interpret the resulting evidence.

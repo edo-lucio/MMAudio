@@ -1,0 +1,72 @@
+#!/bin/bash
+#SBATCH --job-name=mma_got_tok
+#SBATCH --output=logs/got_tok_%j.out
+#SBATCH --error=logs/got_tok_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=24:00:00
+#SBATCH --partition=acltr
+#SBATCH --gres=gpu:2
+#SBATCH --mail-user=edlu@itu.dk
+#SBATCH --mail-type=FAIL
+
+# Token-level fused-GW regularizer (Chen et al. 2020, "Graph Optimal Transport
+# for Cross-Domain Alignment", ICML). Per-sample shared-T fused-GW between
+# post-projection CLIP token graph (n=64) and audio-latent token graph (m=250).
+#
+# Submit:           sbatch jobs/train_got_token.job
+# Override lambda:  sbatch --export=ALL,LAMBDA=0.005 jobs/train_got_token.job
+# Override alpha:   sbatch --export=ALL,ALPHA=0.7   jobs/train_got_token.job
+#
+# alpha = GW vs WD mix (1.0 -> pure GW, 0.0 -> pure Wasserstein on cross cost).
+
+set -e
+set -x
+
+PROJECT_DIR="$HOME/MMA/MMAudio"
+ENV_PATH="/home/edlu/miniconda3-25-5-1-1/envs/gwot"
+
+module load CUDA/12.1.1
+module load NCCL/2.18.3-GCCcore-12.3.0-CUDA-12.1.1
+module load Miniconda3/25.5.1-1
+source /opt/itu/easybuild/software/Miniconda3/25.5.1-1/etc/profile.d/conda.sh
+conda activate "$ENV_PATH"
+cd "$PROJECT_DIR"
+
+export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:${PYTHONPATH}}"
+
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+echo "Pre-warming torch import cache..."
+time python -c "import torch; print('torch', torch.__version__)"
+echo "Cache warm."
+
+mkdir -p logs output
+
+EXP_ID="${EXP_ID:-gw_got_token}"
+MODEL="${MODEL:-small_16k}"
+ITERS="${ITERS:-300000}"
+LAMBDA="${LAMBDA:-0.01}"
+ALPHA="${ALPHA:-0.5}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE}}"
+COMPILE="${COMPILE:-False}"   # default False because sm_75 (Tesla T4) can't JIT bf16 kernels
+NUM_WORKERS="${NUM_WORKERS:-2}"
+
+OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=2 "$PROJECT_DIR/src/train.py" \
+    exp_id="$EXP_ID" \
+    model="$MODEL" \
+    num_iterations="$ITERS" \
+    batch_size="$BATCH_SIZE" \
+    eval_batch_size="$EVAL_BATCH_SIZE" \
+    compile="$COMPILE" \
+    num_workers="$NUM_WORKERS" \
+    gw_regularization.enabled=true \
+    gw_regularization.variant=got_token \
+    gw_regularization.lambda_gw="$LAMBDA" \
+    gw_regularization.alpha="$ALPHA" \
+    gw_regularization.detach_video=true \
+    gw_regularization.anticollapse_weight=0.0
+
+echo "Done: $EXP_ID"

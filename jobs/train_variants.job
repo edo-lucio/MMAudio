@@ -9,12 +9,12 @@
 #SBATCH --time=24:00:00
 #SBATCH --partition=acltr
 #SBATCH --gres=gpu:2
-#SBATCH --array=0-3
+#SBATCH --array=0-4
 #SBATCH --mail-user=edlu@itu.dk
 #SBATCH --mail-type=FAIL,ARRAY_TASKS
 
 # Variant sweep. Each array task = 1 variant on 2 GPUs.
-#   0 -> global   1 -> projected   2 -> c_g   3 -> fused
+#   0 -> global   1 -> projected   2 -> c_g   3 -> fused   4 -> got_token
 # Submit:  sbatch jobs/train_variants.job
 # Override lambda: sbatch --export=ALL,LAMBDA=0.005 jobs/train_variants.job
 
@@ -48,7 +48,7 @@ echo "Cache warm."
 
 mkdir -p logs output
 
-VARIANTS=(global projected c_g fused)
+VARIANTS=(global projected c_g fused got_token)
 VAR="${VARIANTS[$SLURM_ARRAY_TASK_ID]}"
 
 MODEL="${MODEL:-small_16k}"
@@ -63,6 +63,7 @@ AC_WEIGHT="${AC_WEIGHT:-1e-2}"
 case "$VAR" in
     global) AC_W=0.0 ;;
     projected|c_g|fused) AC_W="$AC_WEIGHT" ;;
+    got_token) AC_W=0.0 ;;   # token-level GW is not prone to batch rank-1 collapse
     *) AC_W=0.0 ;;
 esac
 
