@@ -61,7 +61,13 @@ cfg_strength: 4.5
 gw_regularization:
   enabled: false
   variant: global           # global | projected | c_g | fused | got_token
-  lambda_gw: 0.01
+  # GW pressure on the audio projector. Calibrated so that AC barrier cost
+  # (~AC_w * (B-1)*|log eta|) dominates GW gain from collapse (~lambda * GW_init)
+  # by >>1. At lambda=5e-3, GW gain ~0.035; at AC_w=1e-1, eta=1e-4, B=32, the
+  # AC barrier cost is ~28.5 -- ratio ~800x. Previously lambda=1e-2 with
+  # AC_w=1e-2, eta=1e-3 gave a ratio of only 30x and the optimiser overrode
+  # the barrier on projected/c_g/fused.
+  lambda_gw: 5.0e-3
   num_sinkhorn_iter: 5
   epsilon: 0.1
   detach_video: true
@@ -69,11 +75,14 @@ gw_regularization:
   warmup_steps: 1000
   schedule: constant        # constant | linear_rampup | cosine_anneal
   save_couplings: false     # save T* during eval (used by analyze_couplings.py)
-  # spectral anti-collapse penalty -log det(Cov(v) + eta*I) on projector outputs
-  # (Gram-form, equivalent up to a constant). 0 disables; set ~1e-3-1e-2 to
-  # protect c_g / fused / large-lambda projected from rank-1 collapse.
-  anticollapse_weight: 0.0
-  anticollapse_eta: 1.0e-3
+  # Spectral anti-collapse penalty -log det(K + eta*I) on the centred Gram
+  # matrix. Saturation ceiling is (B-1)*log(1/eta); with B=32 and eta=1e-4
+  # this is ~285, so AC_w=1e-1 gives a barrier of ~28.5 -- empirically large
+  # enough that collapse is energetically unfavourable. eta=1e-4 also
+  # sharpens the gradient near degeneracy by 10x relative to the previous
+  # eta=1e-3, making the barrier harder to skirt.
+  anticollapse_weight: 1.0e-1
+  anticollapse_eta: 1.0e-4
   anticollapse_target: both # video | audio | both
 
 # checkpoint paths to external modules
