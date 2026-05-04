@@ -64,7 +64,7 @@ fi
 # ── 2. LaTeX table for the paper ─────────────────────────────────────────────
 echo "=== [2/7] LaTeX table ==="
 if ! skip_if_done paper/sections/results_table.tex "results_table.tex"; then
-    python experiments/analysis.py table \
+    python "$EXPERIMENTS_DIR/analysis.py" table \
         --runs output/${PATTERN} \
         --out paper/sections/results_table.tex
 fi
@@ -72,14 +72,14 @@ fi
 # ── 3. Training-curve plots ──────────────────────────────────────────────────
 echo "=== [3/7] curves ==="
 if ! skip_if_done analysis/curves "curves/"; then
-    python experiments/analysis.py curves \
+    python "$EXPERIMENTS_DIR/analysis.py" curves \
         --runs output/${PATTERN} \
         --out analysis/curves
 fi
 
 # ── 4. Geometry comparison: baseline vs each variant ─────────────────────────
 # cmd_geometry needs pre-extracted feature dumps at <run>/gw_features.pt;
-# experiments/dump_features.py produces them.
+# src/experiments/dump_features.py produces them.
 echo "=== [4/7] geometry per variant ==="
 BASELINE_CKPT="output/${BASELINE}/${BASELINE}_ema_final.pth"
 BASELINE_FEATS="output/${BASELINE}/gw_features.pt"
@@ -90,7 +90,7 @@ fi
 
 # baseline features (variant=global is fine for the baseline; we just need raw reps)
 if [ "${SKIP_GW_STEPS:-0}" != "1" ] && ! skip_if_done "$BASELINE_FEATS" "dump_features/$BASELINE"; then
-    python experiments/dump_features.py \
+    python "$EXPERIMENTS_DIR/dump_features.py" \
         --weights "$BASELINE_CKPT" \
         --variant global \
         --out     "$BASELINE_FEATS"
@@ -107,14 +107,14 @@ for var in $VARIANTS; do
     fi
     # Dump features for this variant if not present.
     if ! skip_if_done "$GW_FEATS" "dump_features/gw_var_${var}"; then
-        python experiments/dump_features.py \
+        python "$EXPERIMENTS_DIR/dump_features.py" \
             --weights "$GW_CKPT" \
             --variant "$var" \
             --out     "$GW_FEATS"
     fi
     if skip_if_done "$OUT_DIR" "geometry/$var"; then continue; fi
     mkdir -p "$OUT_DIR"
-    python experiments/analysis.py geometry \
+    python "$EXPERIMENTS_DIR/analysis.py" geometry \
         --baseline "$BASELINE_FEATS" \
         --gw       "$GW_FEATS" \
         --out      "$OUT_DIR/spectrum.png"
@@ -130,7 +130,7 @@ echo "=== [5/7] per-class deltas ==="
 # Produce baseline perclass_ib.json first.
 if [ "${SKIP_GW_STEPS:-0}" != "1" ] && \
    ! skip_if_done "output/${BASELINE}/perclass_ib.json" "perclass_ib/$BASELINE"; then
-    python experiments/compute_perclass_ib.py \
+    python "$EXPERIMENTS_DIR/compute_perclass_ib.py" \
         --run      "output/${BASELINE}" \
         --gt_cache "$GT_CACHE" \
         --tsv      "$TEST_TSV"
@@ -146,14 +146,14 @@ for var in $VARIANTS; do
     fi
     # Produce per-variant perclass_ib.json.
     if ! skip_if_done "$GW_DIR/perclass_ib.json" "perclass_ib/gw_var_${var}"; then
-        python experiments/compute_perclass_ib.py \
+        python "$EXPERIMENTS_DIR/compute_perclass_ib.py" \
             --run      "$GW_DIR" \
             --gt_cache "$GT_CACHE" \
             --tsv      "$TEST_TSV"
     fi
     if skip_if_done "$OUT_PNG" "perclass/$var.png"; then continue; fi
     mkdir -p analysis/perclass
-    python experiments/analysis.py perclass \
+    python "$EXPERIMENTS_DIR/analysis.py" perclass \
         --baseline "output/${BASELINE}" \
         --gw       "$GW_DIR" \
         --out      "$OUT_PNG"
@@ -170,7 +170,7 @@ for var in $VARIANTS; do
         continue
     fi
     if skip_if_done "$OUT_DIR" "couplings/$var"; then continue; fi
-    python experiments/analyze_couplings.py \
+    python "$EXPERIMENTS_DIR/analyze_couplings.py" \
         --weights "$GW_CKPT" \
         --variant "$var" \
         --out_dir "$OUT_DIR"
@@ -185,7 +185,7 @@ elif [ ! -f "$MMAUDIO_RELEASED_CKPT" ]; then
 elif skip_if_done analysis/motivation "motivation/"; then
     :
 else
-    python experiments/diagnose_geometry.py \
+    python "$EXPERIMENTS_DIR/diagnose_geometry.py" \
         --weights "$MMAUDIO_RELEASED_CKPT" \
         --out_dir analysis/motivation \
         --max_samples "$MAX_MOTIVATION_SAMPLES"

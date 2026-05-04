@@ -94,25 +94,92 @@ must therefore be absorbed by $v_\theta$'s parameters --- there is
 no term in \eqref{eq:fm_loss} that explicitly compares the geometry
 of the two streams.
 
-\paragraph{The MMAudio realisation.}
-MMAudio \citep{cheng_2025_mmaudio} instantiates $v_\theta$ as a
-stack of $N_1$ multimodal MM-DiT blocks
-\citep{esser_2024_scaling} (visual / text / audio streams
-communicating via joint attention) followed by $N_2$ audio-only
-transformer blocks. Conditioning is injected at two levels:
-adaptive layer-norm modulation by a global vector $c_g$ pooled
-from the projected visual and text features, and token-level
-modulation by a frame-aligned vector $c_f$ derived from
-$F_{\mathrm{syn}}$ at $24$ fps. It reaches state of the art among
-public V2A systems \citep{cheng_2025_mmaudio}, surpassing earlier
-flow-matching V2A work such as Frieren
-\citep{wang_2024_frieren} (channel-level fusion + reflow). None of
-these mechanisms align the pairwise relations among audio tokens
-to those among video tokens; each token of one stream is nudged
-toward the correct token of the other stream by attention and
-adaLN, but the geometry of the streams is left to emerge
-incidentally from the token-wise regression in \eqref{eq:fm_loss}.
-The regularizer below targets exactly this gap.
+\paragraph{The MMAudio backbone.}
+We instantiate the velocity field $v_\theta$ via the open-source
+\textbf{MMAudio} system of \citet{cheng_2025_mmaudio}, which at the
+time of writing is the state of the art among public V2A models on
+VGGSound and surpasses earlier flow-matching V2A systems such as
+Frieren \citep{wang_2024_frieren} (channel-level fusion +
+reflow). MMAudio is used here purely as a substrate: it provides
+a strong, well-validated pointwise-alignment baseline against
+which the relational regularizer can be measured, but it is not
+itself the object of study. Three of its design choices are
+load-bearing for our methodology and worth describing in full.
+
+\emph{Input encoders.} The conditioning tuple
+$\mathbf{C} = (F_v, F_{\mathrm{syn}}, F_t)$ is produced by three
+frozen pretrained encoders: a CLIP visual encoder extracts
+$F_v \in \R^{n_v \times d_v}$ at $8$ fps ($d_v = 1024$);
+Synchformer (a self-supervised audio--visual desynchronization
+detector) extracts $F_{\mathrm{syn}}$ at $24$ fps
+($d_{\mathrm{syn}} = 768$); and the CLIP text encoder produces
+$F_t \in \R^{77 \times d_t}$. Audio is encoded by a pretrained
+spectrogram VAE into latents $x_1 \in \R^{N \times d_a}$ at
+$31.25$ fps with $d_a = 20$ (S-16kHz model). Because the encoders
+are frozen, the only learnable parameters that touch the raw
+features are the input projections $\pi_v, \pi_{\mathrm{syn}},
+\pi_t, \pi_a$ and the conditioning projector $\pi_g$ that produces
+the global vector $c_g$ from the pooled visual / text streams.
+This matters for the regularizer of \S\ref{sec:methodology:reps},
+which acts precisely at these projection layers.
+
+\emph{Backbone architecture.} The flow predictor is a stack of
+$N_1$ \emph{multimodal MM-DiT blocks} adapted from the
+text-to-image rectified-flow transformers of
+\citet{esser_2024_scaling}, in which separate weights process the
+visual / text / audio streams while a single \emph{joint
+attention} operation lets the three streams exchange information,
+followed by $N_2$ audio-only transformer blocks. We use the
+default S-16kHz configuration ($N_1 = 4$, $N_2 = 8$, hidden
+dimension $h = 448$, $157$M trainable parameters). Cross-modal
+information is injected at two granularities, and these are the
+two carriers our regularizer can target:
+\begin{enumerate}
+  \item a \emph{global} adaLN modulation by a vector
+    $c_g \in \R^{1 \times h}$ pooled from the projected visual
+    and text features and broadcast to every audio token, applied
+    in every block; and
+  \item a \emph{token-level} adaLN modulation by a frame-aligned
+    vector $c_f \in \R^{N \times h}$ obtained by upsampling the
+    projected Synchformer features to the audio frame rate, applied
+    only in the audio stream and intended specifically for
+    audio--visual synchronisation.
+\end{enumerate}
+The global vector $c_g$ is the natural target for a
+\emph{semantic} relational signal (one vector per sample, summarising
+``what is in the clip''), while the token-level $c_f$ is the
+natural target for a \emph{temporal} synchronisation signal. Our
+global-conditioning variant in \S\ref{sec:methodology:reps} aligns the
+audio batch geometry to the geometry of $c_g$ across samples;
+$c_f$ is left untouched because its role is already strongly
+constrained by Synchformer.
+
+\emph{Training recipe.} MMAudio is trained jointly on
+audio-visual-text data (VGGSound, the only tri-modal source) and
+audio-text data (AudioCaps, Clotho, WavCaps), with missing
+modalities filled by learnable empty-token embeddings $\varnothing_v,
+\varnothing_{\mathrm{syn}}, \varnothing_t$. A classifier-free
+guidance schedule masks out visual or text tokens with $10\%$
+probability during training. We inherit this recipe unchanged ---
+including the joint-training data mix, the empty-token mechanism,
+the $300\text{K}$-step training horizon, the AdamW optimiser with
+$\beta_2 = 0.95$ (rather than the default $0.999$, which causes
+occasional NaNs in their setting), and the linear-then-stepped
+learning-rate schedule. Two implications follow for the
+regularizer: (i) the GW penalty must be computed only over the
+subset of the batch with real video features, since the
+empty-token embeddings carry no relational information
+(\S\ref{sec:methodology:training}); and (ii) any improvement we
+report is attributable to the regularizer alone, not to a change
+in the data mix or training schedule.
+
+None of the conditioning mechanisms above align the pairwise
+relations among audio tokens to those among video tokens or among
+samples in the batch; each token of one stream is nudged toward
+the correct token of the other stream by attention and adaLN, but
+the geometry of the streams is left to emerge incidentally from
+the token-wise regression in \eqref{eq:fm_loss}. The regularizer
+below targets exactly this gap.
 
 \subsection{Representation variants and the relational signal}
 \label{sec:methodology:reps}
@@ -120,60 +187,148 @@ The regularizer below targets exactly this gap.
 For a mini-batch of size $B$, write
 $F_v^{(b)} \in \R^{n_v \times d_v}$ for the raw CLIP feature
 sequence of sample $b$ (with $n_v$ visual tokens of dimension
-$d_v=1024$) and $x_1^{(b)} \in \R^{N \times d_a}$ for the
+$d_v = 1024$) and $x_1^{(b)} \in \R^{N \times d_a}$ for the
 corresponding audio latent. The regularizer takes as input two
 families of squared-Euclidean intra-modal distance matrices, one
-per side. We expose four ways of constructing them, each
-corresponding to a different geometric hypothesis about \emph{which}
-representations should align relationally.
+per side. We expose five constructions of these matrices, each
+corresponding to a different geometric hypothesis about
+\emph{which} representations carry the cross-modal relational
+signal and at \emph{which} learnable layer it should be injected.
+The constructions partition naturally into two families. The first
+four operate at the \emph{batch} level: they compress each token
+sequence into a single vector per sample and compute pairwise
+distances across the $B$ samples of the mini-batch, yielding
+$B \times B$ matrices $\DV, \DA$ that compare \emph{clips} to each
+other. The fifth operates at the \emph{token} level: it keeps the
+token sequences intact and computes pairwise distances within
+each clip, yielding per-sample $n \times n$ and $N \times N$
+matrices that compare visual and audio tokens of the same clip
+to each other.
 
-The first three variants compress each token sequence into a single
-vector and compute pairwise distances \emph{across} the batch,
-yielding $B \times B$ matrices $\DV, \DA \in \R^{B \times B}$. The
-fourth keeps token sequences intact and computes pairwise distances
-\emph{within} each sample, yielding per-sample $n \times n$ and
-$m \times m$ matrices. Concretely:
+\paragraph{Encoder-space variant.}
+The first construction, which we call the \emph{encoder-space}
+variant, computes pairwise distances over pre-projection averages
+$\bar v^{(b)} = \tfrac{1}{n_v} \sum_i F_v^{(b),i}$ and
+$\bar x^{(b)} = \tfrac{1}{N} \sum_i x_1^{(b),i}$, where the
+average is taken over the token dimension. No learnable parameter
+sits between the encoders and the GW solver: the gradient of the
+regularizer cannot reshape any layer of MMAudio, since the only
+parameters in the path are the frozen CLIP and VAE weights. This
+variant therefore answers a diagnostic question --- whether the
+raw encoder geometry already carries relational structure that
+the entropic-GW solver can exploit --- and acts as a control: any
+improvement it brings can be attributed entirely to the encoder
+geometry as inherited from CLIP, not to representation learning
+in the backbone.
 
-\begin{description}
-  \item[\texttt{global}] uses pre-projection averages
-    $\bar v^{(b)} = \tfrac{1}{n_v}\sum_i F_v^{(b),i}$ and
-    $\bar x^{(b)} = \tfrac{1}{N}\sum_i x_1^{(b),i}$. This probes
-    whether the raw encoder geometry already carries cross-modal
-    relational structure, before any of MMAudio's learnable
-    parameters intervene.
-  \item[\texttt{projected}] passes the raw features through
-    MMAudio's input projection layers $\pi_v, \pi_a$ before
-    averaging:
-    $\tilde v^{(b)} = \tfrac{1}{n_v}\sum_i \pi_v(F_v^{(b)})_i$,
-    analogously for audio. The relational signal now back-propagates
-    into $\pi_v$ and $\pi_a$, the first learnable layers the GW
-    objective can reshape.
-  \item[\texttt{c\_g}] uses the same audio side as
-    \texttt{projected} but, on the video side, applies the global
-    conditioning projection
-    $c_g^{(b)} = \pi_g\bigl(\tfrac{1}{n_v}\sum_i \pi_v(F_v^{(b)})_i\bigr)$,
-    i.e.\ the very vector that drives MMAudio's adaLN modulation.
-    Aligning the geometry of $c_g$ to the audio geometry directly
-    targets the conditioning signal that already flows through every
-    transformer block.
-  \item[\texttt{fused}] uses the same averaged projected
-    representations as \texttt{projected}, but couples the GW
-    objective to a Wasserstein term on the cross-modal cosine
-    distance, yielding a fused-Gromov--Wasserstein loss in the
-    sense of \citet{vayer_2019_optimal,vayer_2019_fused}. The
-    transport plan is shared between the two terms, in the manner
-    of \citet{chen_2020_graph}.
-  \item[\texttt{got\_token}] keeps the per-sample token graphs.
-    For each sample $b$ we form
-    $D_{\mathrm{V}}^{(b)} \in \R^{n_v \times n_v}$ from the
-    projected visual tokens and
-    $D_{\mathrm{A}}^{(b)} \in \R^{N \times N}$ from the projected
-    audio tokens, with a per-sample cross-modal cost
-    $C_{\mathrm{xy}}^{(b)} \in \R^{n_v \times N}$, and solve a
-    fused-GW problem \emph{per sample}. This is the formulation
-    closest in spirit to GOT \citep{chen_2020_graph}, lifted from
-    image--text token sets to per-sample video / audio token sets.
-\end{description}
+\paragraph{Projection-space variant.}
+The \emph{projection-space} variant passes the raw token sequences
+through MMAudio's input projections $\pi_v, \pi_a$ before
+averaging,
+$\tilde v^{(b)} = \tfrac{1}{n_v} \sum_i \pi_v(F_v^{(b)})_i$,
+analogously for audio. The pairwise-distance matrices are now
+computed on representations whose first layer is learnable, so
+the GW gradient back-propagates into $\pi_v$ and $\pi_a$ and can
+reshape the very inputs the multimodal transformer blocks see.
+Because $\pi_a$ is also on the path of every flow-matching
+gradient, the GW signal here competes most directly with the
+flow-matching loss for control of the projection geometry; this
+makes the projection-space variant the most architecturally
+``invasive'' of the batch-level alternatives.
+
+\paragraph{Global-conditioning variant.}
+The \emph{global-conditioning} variant aligns the audio side to
+the very vector that drives MMAudio's adaLN modulation. The audio
+representation is computed exactly as in the projection-space
+variant, but the video representation is replaced by the
+post-projection global conditioning vector
+$c_g^{(b)} = \pi_g\bigl(\tfrac{1}{n_v} \sum_i \pi_v(F_v^{(b)})_i\bigr)$,
+where $\pi_g$ is the conditioning projector that produces the
+adaLN scales and biases broadcast to every token of every block.
+Because $c_g$ is the only carrier of \emph{semantic} (as opposed
+to temporal-synchronisation) cross-modal information in MMAudio,
+this variant directly targets the channel that is already
+responsible for ``what is in the clip''. Geometrically, it asks
+that the batch geometry of the conditioning summary match the
+batch geometry of the audio targets, allowing the regularizer to
+shape both $\pi_a$ and the conditioning projector $\pi_g$.
+
+\paragraph{Fused variant.}
+The \emph{fused} variant uses the same projected representations
+as the projection-space variant but couples the relational GW
+objective to a Wasserstein term on a cross-modal cosine cost,
+yielding a fused Gromov--Wasserstein loss in the sense of
+\citet{vayer_2019_optimal, vayer_2019_fused}. The two terms share
+a single Sinkhorn-solved transport plan, following the GOT recipe
+of \citet{chen_2020_graph}. The cross-modal cost is constructed
+exactly as described in \S\ref{sec:methodology:fgw} below: each
+sample's projected video and audio representations are
+$L_2$-normalised onto the unit sphere, and the cross-modal cost
+matrix has entries $1 - \hat v_i^{\!\top} \hat a_j$. The diagonal
+of this matrix records the cosine distance between the projected
+video and audio representations of the \emph{same} sample, which
+the Wasserstein term penalises directly while the GW term
+continues to align the relational geometry of the two streams.
+
+\paragraph{Token-graph variant.}
+The fifth construction, which we call the \emph{token-graph}
+variant, abandons the cross-batch view and instead solves a fused
+GW problem \emph{per sample, on token-level graphs}. For each
+sample $b$ in the mini-batch we form an intra-video distance
+matrix
+$\DV^{(b)} \in \R^{n_v \times n_v}$
+from the projected visual tokens, an intra-audio distance matrix
+$\DA^{(b)} \in \R^{N \times N}$
+from the projected audio tokens, and a per-sample cross-modal
+cosine cost
+$C_{\mathrm{xy}}^{(b)} \in \R^{n_v \times N}$
+between every visual token and every audio token of the same
+clip. A fused GW problem with a single shared $n_v \times N$
+transport plan is solved independently per sample, and the loss
+is averaged over the batch. This is the formulation closest in
+spirit to the original GOT
+\citep{chen_2020_graph}, lifted from image-region / word-token
+sets to within-clip video / audio token sets. Because each sample
+contributes its own transport plan and its own pair of distance
+matrices, the token-graph variant cannot collapse the batch onto
+a single direction in the way the four batch-level variants can,
+and consequently does not require the spectral anti-collapse
+penalty introduced in \S\ref{sec:methodology:anticollapse}.
+
+Table~\ref{tab:variants} summarises the five constructions along
+the dimensions that distinguish them: which representation feeds
+the distance matrices, which learnable parameters lie on the GW
+gradient path, the shape of the resulting cost matrices, and
+whether a cross-modal Wasserstein term is added.
+
+\begin{table}[t]
+  \centering
+  \small
+  \begin{tabular}{@{}lllll@{}}
+    \toprule
+    Variant & Representation & Learnable parameters on GW path & Distance-matrix shape & Cross-modal cost? \\
+    \midrule
+    Encoder-space        & $\bar v$, $\bar x$                                 & none                             & $B \times B$                              & no  \\
+    Projection-space     & $\pi_v(F_v)$, $\pi_a(x_1)$ averaged                & $\pi_v$, $\pi_a$                 & $B \times B$                              & no  \\
+    Global-conditioning  & $c_g = \pi_g(\overline{\pi_v F_v})$, $\pi_a(x_1)$  & $\pi_v$, $\pi_g$, $\pi_a$        & $B \times B$                              & no  \\
+    Fused                & $\pi_v(F_v)$, $\pi_a(x_1)$ averaged                & $\pi_v$, $\pi_a$                 & $B \times B$                              & yes (batch-level) \\
+    Token-graph          & $\pi_v(F_v)$, $\pi_a(x_1)$ token-wise              & $\pi_v$, $\pi_a$                 & $n_v \times n_v$, $N \times N$ per sample & yes (per-sample) \\
+    \bottomrule
+  \end{tabular}
+  \caption{The five representation variants used by the GW
+    regularizer, ordered from least to most architecturally
+    invasive on the four batch-level rows. For all variants
+    except encoder-space, the gradient of the regularizer reaches
+    at least the input projections of MMAudio; the
+    global-conditioning variant additionally reshapes the
+    conditioning projector $\pi_g$ that drives every adaLN block.
+    The token-graph variant is the only one whose distance
+    matrices are intra-clip rather than inter-clip; it is also
+    the only one that does not require the spectral
+    anti-collapse penalty of
+    \S\ref{sec:methodology:anticollapse}.}
+  \label{tab:variants}
+\end{table}
 
 For all variants, raw squared distances $D$ are normalised by
 their mean,
@@ -322,7 +477,7 @@ comparable across the four variants.
 \subsection{Fused Gromov--Wasserstein}
 \label{sec:methodology:fgw}
 
-For the \texttt{fused} and \texttt{got\_token} variants we add a
+For the fused and token-graph variants we add a
 linear (Wasserstein) cross-modal term and share a single transport
 plan between the two contributions, following GOT
 \citep{chen_2020_graph} and the FGW formulation of
@@ -339,8 +494,8 @@ $C_{\mathrm{xy}}$. Concretely, write
 $\tilde v, \tilde a \in \R^{\bullet \times d}$ for the projected
 representations on the video and audio sides --- where $\bullet$
 is the batch index $b \in \{1,\dots,B\}$ for the cross-batch
-\texttt{fused} variant, and the within-sample token index for
-\texttt{got\_token}. We first $L_2$-normalise each row so that
+fused variant, and the within-sample token index for the
+token-graph variant. We first $L_2$-normalise each row so that
 every representation lies on the unit sphere of $\R^d$,
 \begin{equation}
   \hat v_i \;=\; \tilde v_i \,/\, \lVert \tilde v_i \rVert_2,
@@ -356,13 +511,13 @@ and then compute the matrix of pairwise cosine \emph{distances}
   \;\in\; [0, 2].
   \label{eq:ccross}
 \end{equation}
-For the cross-batch \texttt{fused} variant this yields
+For the cross-batch fused variant this yields
 $C_{\mathrm{xy}} \in \R^{B \times B}$ whose diagonal entries are
 the cosine distances between the projected video and audio
 representations of the \emph{same} sample $b$ --- the natural
 "pointwise" cost that an OT plan with diagonal mass would pay zero
 under perfect cross-modal feature alignment. For
-\texttt{got\_token} the same construction is performed
+the token-graph variant the same construction is performed
 \emph{within each sample} on the projected token sequences,
 yielding a per-sample $C_{\mathrm{xy}}^{(b)} \in \R^{n \times m}$
 that compares each video token to each audio token of the same
@@ -560,22 +715,24 @@ Improvements traceable to $\LGW$ can therefore be attributed to
 the relational signal specifically, rather than to extra capacity
 or extra supervision in some other form.
 
-Second, the four representation variants of
+Second, the five representation variants of
 \S\ref{sec:methodology:reps} disentangle \emph{where} in the
-network the relational signal is injected. \texttt{global}
-operates before any learnable layer and asks whether the encoder
-geometry already supports relational alignment without parameter
-updates; \texttt{projected} injects the signal into the input
-projections and lets it propagate through every transformer block;
-\texttt{c\_g} aligns the very vector that drives adaLN modulation;
-\texttt{fused} adds a Wasserstein term to test whether
-relational and pointwise signals are complementary at the same
-representation level; \texttt{got\_token} moves the GW objective
-from cross-batch geometry to within-sample token geometry,
-matching most closely the setting in which GW is typically deployed
-\citep{chen_2020_graph,vayer_2019_optimal}. The five variants are
-the five most natural injection points in MMAudio's
-information flow; the ablation is exhaustive at this granularity.
+network the relational signal is injected. The encoder-space
+variant operates before any learnable layer and asks whether the
+encoder geometry already supports relational alignment without
+parameter updates; the projection-space variant injects the
+signal into the input projections and lets it propagate through
+every transformer block; the global-conditioning variant aligns
+the very vector that drives adaLN modulation; the fused variant
+adds a Wasserstein term to test whether relational and pointwise
+signals are complementary at the same representation level; and
+the token-graph variant moves the GW objective from cross-batch
+geometry to within-sample token geometry, matching most closely
+the setting in which GW is typically deployed
+\citep{chen_2020_graph, vayer_2019_optimal}. The five variants
+are the five most natural injection points in MMAudio's
+information flow, and the ablation is exhaustive at this
+granularity.
 
 Third, the schedule \eqref{eq:lambda_schedule} resolves a confound
 that prior fused-OT work leaves implicit: improvements (or
