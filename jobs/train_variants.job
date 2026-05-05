@@ -60,17 +60,10 @@ BATCH_SIZE="${BATCH_SIZE:-32}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE}}"
 COMPILE="${COMPILE:-False}"   # default False because sm_75 (Tesla T4) can't JIT bf16 kernels
 
-# Anti-collapse penalty: enable on learnable-projector variants only.
-# Defaults raised from 1e-2 / 1e-3 to 1e-1 / 1e-4 so the AC barrier (cost ~28.5
-# at saturation) dominates GW gain from collapse (~0.035) by ~800x.
-AC_WEIGHT="${AC_WEIGHT:-1e-1}"
-AC_ETA="${AC_ETA:-1e-4}"
-case "$VAR" in
-    global) AC_W=0.0 ;;
-    projected|c_g|fused) AC_W="$AC_WEIGHT" ;;
-    got_token) AC_W=0.0 ;;   # token-level GW is not prone to batch rank-1 collapse
-    *) AC_W=0.0 ;;
-esac
+# Collapse-prevention is selected by gw_regularization.collapse_penalty in
+# config/base_config.yaml (default: vicreg). Override here only if you need
+# to ablate, e.g.  COLLAPSE_PENALTY=logdet bash jobs/launch_all.sh.
+COLLAPSE_PENALTY="${COLLAPSE_PENALTY:-vicreg}"
 
 OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=2 "$PROJECT_DIR/src/train.py" \
     exp_id="gw_var_${VAR}" \
@@ -83,7 +76,6 @@ OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=2 "$PROJECT_DIR/src/tra
     gw_regularization.variant="$VAR" \
     gw_regularization.lambda_gw="$LAMBDA" \
     gw_regularization.detach_video=true \
-    gw_regularization.anticollapse_weight="$AC_W" \
-    gw_regularization.anticollapse_eta="$AC_ETA"
+    gw_regularization.collapse_penalty="$COLLAPSE_PENALTY"
 
 echo "Done: gw_var_${VAR}"

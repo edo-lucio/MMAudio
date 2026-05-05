@@ -37,6 +37,42 @@ def _normalize_dist(D: Tensor) -> Tensor:
     return D / m
 
 
+def vicreg_loss(
+    z: Tensor,
+    *,
+    gamma: float = 1.0,
+    var_weight: float = 1.0,
+    cov_weight: float = 1.0,
+    eps: float = 1e-4,
+) -> Tensor:
+    """VICReg variance + covariance regulariser (Bardes, Ponce & LeCun, ICLR 2022).
+
+    Operates on any 2D representation ``z`` of shape ``(N, D)``. For token-level
+    variants (``got_token``, ``c_g``, ``fused``) the caller flattens
+    ``(B, k, D) -> (B*k, D)`` first; the same penalty then applies uniformly.
+
+    - Variance term:   mean over d of   max(0, gamma - sqrt(Var(z_d) + eps)).
+      Forces per-coordinate stddev above ``gamma``; rank-1 collapse drives all
+      stddevs to zero, sending the term to ``gamma * D`` -- a hard barrier.
+    - Covariance term: ``sum_{i != j} Cov(z)_{ij}^2 / D``.
+      Decorrelates feature dimensions; prevents informational collapse where
+      multiple coords carry the same signal.
+
+    Returns a single scalar combining the two terms with their weights.
+    """
+    N = z.shape[0]
+    if N < 2:
+        return torch.zeros((), device=z.device, dtype=z.dtype)
+    z_c = z - z.mean(dim=0, keepdim=True)
+    std = torch.sqrt(z_c.var(dim=0, unbiased=False) + eps)
+    var_term = F.relu(gamma - std).mean()
+    D = z.shape[1]
+    cov = (z_c.transpose(0, 1) @ z_c) / float(max(N - 1, 1))
+    off_diag_sq = (cov - torch.diag(torch.diagonal(cov))).pow(2).sum()
+    cov_term = off_diag_sq / float(max(D, 1))
+    return var_weight * var_term + cov_weight * cov_term
+
+
 def anticollapse_logdet(v: Tensor, eta: float = 1e-3) -> Tensor:
     """Spectral anti-collapse penalty: ``-log det(K + eta * I)`` on the
     centered Gram matrix ``K = (v - mean) (v - mean)^T / (B - 1)``.
@@ -297,6 +333,11 @@ def compute_gw_regularization(
     anticollapse_weight: float = 0.0,
     anticollapse_eta: float = 1e-3,
     anticollapse_target: str = "both",
+    vicreg_weight: float = 0.0,
+    vicreg_gamma: float = 1.0,
+    vicreg_var_weight: float = 1.0,
+    vicreg_cov_weight: float = 1.0,
+    vicreg_target: str = "both",
     audio_encoder: str = "vae",
     clap_f_raw: Optional[Tensor] = None,
 ) -> tuple[Tensor, Optional[Tensor], Tensor]:
@@ -364,9 +405,30 @@ def compute_gw_regularization(
             )
             if not torch.isfinite(gw_loss):
                 return zero, None, zero
-            # anti-collapse not applied: token graphs don't suffer the
-            # rank-1 batch collapse the penalty was designed to repel.
-            return gw_loss, T, zero
+            # logdet anti-collapse is not applied here (token graphs do not
+            # suffer rank-1 *batch* collapse); VICReg, however, applies
+            # uniformly by flattening tokens into the sample axis, so it is
+            # available as the principled cross-variant ablation.
+            ac = zero
+            if vicreg_weight > 0.0:
+                if vicreg_target in ("video", "both"):
+                    v_flat = v_tok.reshape(-1, v_tok.shape[-1])
+                    ac = ac + vicreg_loss(
+                        v_flat, gamma=vicreg_gamma,
+                        var_weight=vicreg_var_weight,
+                        cov_weight=vicreg_cov_weight,
+                    )
+                if vicreg_target in ("audio", "both"):
+                    a_flat = a_tok.reshape(-1, a_tok.shape[-1])
+                    ac = ac + vicreg_loss(
+                        a_flat, gamma=vicreg_gamma,
+                        var_weight=vicreg_var_weight,
+                        cov_weight=vicreg_cov_weight,
+                    )
+            if not torch.isfinite(ac):
+                return zero, None, zero
+            loss = gw_loss + vicreg_weight * ac
+            return loss, T, ac.detach()
 
         v, a = _extract_representations(
             network, variant, clip_sub, x1_sub,
@@ -380,6 +442,26 @@ def compute_gw_regularization(
                 ac = ac + anticollapse_logdet(v, eta=anticollapse_eta)
             if anticollapse_target in ("audio", "both"):
                 ac = ac + anticollapse_logdet(a, eta=anticollapse_eta)
+
+        # VICReg: principled per-coordinate variance hinge + decorrelation.
+        # Applied uniformly across all four pooled variants (global, projected,
+        # c_g, fused) because it depends only on the (B, D) shape of the reps.
+        # If both penalties are configured, their weights add; the typical
+        # ablation sets one or the other to 0.
+        vc = zero
+        if vicreg_weight > 0.0:
+            if vicreg_target in ("video", "both"):
+                vc = vc + vicreg_loss(
+                    v, gamma=vicreg_gamma,
+                    var_weight=vicreg_var_weight,
+                    cov_weight=vicreg_cov_weight,
+                )
+            if vicreg_target in ("audio", "both"):
+                vc = vc + vicreg_loss(
+                    a, gamma=vicreg_gamma,
+                    var_weight=vicreg_var_weight,
+                    cov_weight=vicreg_cov_weight,
+                )
 
         v_gw = v.detach() if detach_video else v
 
@@ -404,11 +486,16 @@ def compute_gw_regularization(
                 epsilon=epsilon,
             )
 
-        if not torch.isfinite(gw_loss) or not torch.isfinite(ac):
+        if (not torch.isfinite(gw_loss)
+                or not torch.isfinite(ac)
+                or not torch.isfinite(vc)):
             return zero, None, zero
 
-        loss = gw_loss + anticollapse_weight * ac
-    return loss, T, ac.detach()
+        loss = gw_loss + anticollapse_weight * ac + vicreg_weight * vc
+        # Combined collapse-control term reported for logging; downstream
+        # consumers don't need to distinguish logdet from VICReg.
+        ac_report = anticollapse_weight * ac + vicreg_weight * vc
+    return loss, T, ac_report.detach()
 
 
 def lambda_schedule(step: int, *, base: float, warmup_steps: int, schedule: str,

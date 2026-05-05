@@ -127,13 +127,26 @@ GT_CACHE="${GT_CACHE:-./data/eval-cache/vggsound-test-eval-cache}"
 TEST_TSV="${TEST_TSV:-training/example_output/memmap/vgg-test.tsv}"
 
 echo "=== [5/7] per-class deltas ==="
+
+# perclass_ib needs predicted PANN features that eval_run.py / eval_all.job
+# write to <run>/test-sampled/cache/ or <run>/test-output/cache/. If neither
+# exists for a run, evaluation has not been done yet and we must skip.
+has_pann_features() {
+    local run_dir="$1"
+    [ -f "$run_dir/test-sampled/cache/pann_features.pth" ] || \
+    [ -f "$run_dir/test-output/cache/pann_features.pth" ]
+}
+
 # Produce baseline perclass_ib.json first.
-if [ "${SKIP_GW_STEPS:-0}" != "1" ] && \
-   ! skip_if_done "output/${BASELINE}/perclass_ib.json" "perclass_ib/$BASELINE"; then
-    python "$EXPERIMENTS_DIR/compute_perclass_ib.py" \
-        --run      "output/${BASELINE}" \
-        --gt_cache "$GT_CACHE" \
-        --tsv      "$TEST_TSV"
+if [ "${SKIP_GW_STEPS:-0}" != "1" ]; then
+    if ! has_pann_features "output/${BASELINE}"; then
+        echo "[warn] no PANN features under output/${BASELINE} (run eval_all.job first) — skipping baseline perclass_ib"
+    elif ! skip_if_done "output/${BASELINE}/perclass_ib.json" "perclass_ib/$BASELINE"; then
+        python "$EXPERIMENTS_DIR/compute_perclass_ib.py" \
+            --run      "output/${BASELINE}" \
+            --gt_cache "$GT_CACHE" \
+            --tsv      "$TEST_TSV"
+    fi
 fi
 
 for var in $VARIANTS; do
@@ -142,6 +155,16 @@ for var in $VARIANTS; do
     OUT_PNG="analysis/perclass/${var}.png"
     if [ ! -d "$GW_DIR" ]; then
         echo "[warn] missing $GW_DIR — skipping perclass for variant=$var"
+        continue
+    fi
+    if ! has_pann_features "$GW_DIR"; then
+        echo "[warn] no PANN features under $GW_DIR (run eval_all.job first) — skipping perclass for variant=$var"
+        continue
+    fi
+    # Baseline JSON is required by analysis.py perclass; skip the variant if
+    # the baseline side wasn't produced (e.g. baseline never evaluated).
+    if [ ! -f "output/${BASELINE}/perclass_ib.json" ]; then
+        echo "[warn] missing output/${BASELINE}/perclass_ib.json — skipping perclass for variant=$var"
         continue
     fi
     # Produce per-variant perclass_ib.json.

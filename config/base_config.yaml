@@ -75,12 +75,29 @@ gw_regularization:
   warmup_steps: 1000
   schedule: constant        # constant | linear_rampup | cosine_anneal
   save_couplings: false     # save T* during eval (used by analyze_couplings.py)
+  # Single switch selecting the collapse-prevention term applied to the GW
+  # representations. Exactly one penalty is active at a time; the runner
+  # forwards only the weights belonging to the selected branch.
+  #   vicreg : VICReg variance hinge + covariance decorrelation (default).
+  #            Principled, applies uniformly across all variants -- including
+  #            the token-level got_token, where logdet was a no-op.
+  #   logdet : -log det(K + eta*I) spectral anti-collapse on pooled reps.
+  #            Original implementation; retained for ablation comparisons.
+  #   none   : no collapse penalty (control).
+  collapse_penalty: vicreg
+  # VICReg hyperparameters (Bardes, Ponce & LeCun, ICLR 2022). Defaults follow
+  # the paper. var_weight pushes per-coordinate stddev above gamma; cov_weight
+  # decorrelates feature dimensions.
+  vicreg_weight: 1.0
+  vicreg_gamma: 1.0
+  vicreg_var_weight: 1.0
+  vicreg_cov_weight: 4.0e-2
+  vicreg_target: both       # video | audio | both
   # Spectral anti-collapse penalty -log det(K + eta*I) on the centred Gram
   # matrix. Saturation ceiling is (B-1)*log(1/eta); with B=32 and eta=1e-4
   # this is ~285, so AC_w=1e-1 gives a barrier of ~28.5 -- empirically large
-  # enough that collapse is energetically unfavourable. eta=1e-4 also
-  # sharpens the gradient near degeneracy by 10x relative to the previous
-  # eta=1e-3, making the barrier harder to skirt.
+  # enough that collapse is energetically unfavourable. Only consulted when
+  # collapse_penalty=logdet.
   anticollapse_weight: 1.0e-1
   anticollapse_eta: 1.0e-4
   anticollapse_target: both # video | audio | both

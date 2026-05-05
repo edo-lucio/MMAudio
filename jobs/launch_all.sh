@@ -23,31 +23,26 @@ PHASE="${1:-all}"
 
 ITERS="${ITERS:-300000}"
 MODEL="${MODEL:-small_16k}"
-# Defaults calibrated for V100 + B=32 against the collapse failure mode
-# observed in the previous sweep (AC saturated at 221 for projected/c_g/fused).
-# - LAMBDA halved to 0.005: lower GW gain from collapse (~0.035 instead of 0.07).
-# - AC_WEIGHT raised to 0.1: barrier cost ~28.5 vs previous 2.21.
-# - AC_ETA tightened to 1e-4: ceiling (B-1)|log eta| rises to ~285,
-#   gradient at degeneracy 10x sharper than at eta=1e-3.
-# Net: AC barrier dominates GW gain by ~800x, vs ~30x previously.
+# Collapse prevention is now selected by gw_regularization.collapse_penalty in
+# config/base_config.yaml (default: vicreg). To ablate, override here:
+#     COLLAPSE_PENALTY=logdet bash jobs/launch_all.sh
+#     COLLAPSE_PENALTY=none   bash jobs/launch_all.sh
 LAMBDA="${LAMBDA:-5e-3}"
 OOD_VARIANT="${OOD_VARIANT:-global}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE}}"
 COMPILE="${COMPILE:-False}"
-AC_WEIGHT="${AC_WEIGHT:-1e-1}"
-AC_ETA="${AC_ETA:-1e-4}"
+COLLAPSE_PENALTY="${COLLAPSE_PENALTY:-vicreg}"
 
-EXPORT="ALL,ITERS=${ITERS},MODEL=${MODEL},LAMBDA=${LAMBDA},OOD_VARIANT=${OOD_VARIANT},BATCH_SIZE=${BATCH_SIZE},EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE},COMPILE=${COMPILE},AC_WEIGHT=${AC_WEIGHT},AC_ETA=${AC_ETA}"
+EXPORT="ALL,ITERS=${ITERS},MODEL=${MODEL},LAMBDA=${LAMBDA},OOD_VARIANT=${OOD_VARIANT},BATCH_SIZE=${BATCH_SIZE},EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE},COMPILE=${COMPILE},COLLAPSE_PENALTY=${COLLAPSE_PENALTY}"
 
 echo "== GW experiment launcher =="
-echo "phase        = $PHASE"
-echo "ITERS        = $ITERS"
-echo "MODEL        = $MODEL"
-echo "LAMBDA       = $LAMBDA"
-echo "OOD_VARIANT  = $OOD_VARIANT"
-echo "AC_WEIGHT    = $AC_WEIGHT"
-echo "AC_ETA       = $AC_ETA"
+echo "phase             = $PHASE"
+echo "ITERS             = $ITERS"
+echo "MODEL             = $MODEL"
+echo "LAMBDA            = $LAMBDA"
+echo "OOD_VARIANT       = $OOD_VARIANT"
+echo "COLLAPSE_PENALTY  = $COLLAPSE_PENALTY"
 echo "----------------------------"
 
 submit() {

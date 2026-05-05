@@ -355,9 +355,24 @@ class Runner:
                     num_sinkhorn_iter=self.gw_cfg.num_sinkhorn_iter,
                     epsilon=self.gw_cfg.epsilon,
                     alpha=self.gw_cfg.alpha,
-                    anticollapse_weight=float(self.gw_cfg.get('anticollapse_weight', 0.0)),
+                    # Single switch: route the configured weights to exactly
+                    # one branch so the two penalties never silently stack.
+                    anticollapse_weight=(
+                        float(self.gw_cfg.get('anticollapse_weight', 0.0))
+                        if str(self.gw_cfg.get('collapse_penalty', 'vicreg')) == 'logdet'
+                        else 0.0
+                    ),
                     anticollapse_eta=float(self.gw_cfg.get('anticollapse_eta', 1e-3)),
                     anticollapse_target=str(self.gw_cfg.get('anticollapse_target', 'both')),
+                    vicreg_weight=(
+                        float(self.gw_cfg.get('vicreg_weight', 0.0))
+                        if str(self.gw_cfg.get('collapse_penalty', 'vicreg')) == 'vicreg'
+                        else 0.0
+                    ),
+                    vicreg_gamma=float(self.gw_cfg.get('vicreg_gamma', 1.0)),
+                    vicreg_var_weight=float(self.gw_cfg.get('vicreg_var_weight', 1.0)),
+                    vicreg_cov_weight=float(self.gw_cfg.get('vicreg_cov_weight', 4e-2)),
+                    vicreg_target=str(self.gw_cfg.get('vicreg_target', 'both')),
                 )
                 self.train_integrator.add_dict({
                     'gw_loss': gw_loss.detach(),
