@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 import torch
 from hydra import compose, initialize
-from scipy.stats import kendalltau, pearsonr, spearmanr
+from scipy.stats import kendalltau, pearsonr, rankdata, spearmanr
 
 from mmaudio.data_mod.extracted_vgg import ExtractedVGG
 from mmaudio.model.gw_regularization import (
@@ -213,6 +213,303 @@ def plot_procrustes_cka_bar(rows, out_path):
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
+
+
+def _2d_embedding(X, n_neighbors=15, min_dist=0.1, seed=0):
+    """UMAP if available, otherwise PCA fallback. Returns (N, 2) float."""
+    try:
+        import umap  # type: ignore
+        reducer = umap.UMAP(
+            n_components=2,
+            n_neighbors=min(n_neighbors, max(2, len(X) - 1)),
+            min_dist=min_dist,
+            random_state=seed,
+            metric='euclidean',
+        )
+        return reducer.fit_transform(X), 'UMAP'
+    except Exception:
+        Xc = X - X.mean(0, keepdims=True)
+        try:
+            U, S, _ = np.linalg.svd(Xc, full_matrices=False)
+        except np.linalg.LinAlgError:
+            from scipy.linalg import svd as scipy_svd
+            U, S, _ = scipy_svd(Xc, full_matrices=False, lapack_driver='gesvd')
+        return (U[:, :2] * S[:2]), 'PCA'
+
+
+def plot_pairwise_dist_overlay(V, A, variant, out_path, bins=80):
+    """Histogram overlay of mean-normalised pairwise squared L2 on the upper
+    triangle. GW operates on these matrices -- if the marginals match shape,
+    GW's optimisation is well-posed; mismatched shapes diagnose where the
+    entropic relaxation has to do work.
+    """
+    DV = ((V[:, None] - V[None, :]) ** 2).sum(-1)
+    DA = ((A[:, None] - A[None, :]) ** 2).sum(-1)
+    dv = upper_tri(DV) / (upper_tri(DV).mean() + 1e-12)
+    da = upper_tri(DA) / (upper_tri(DA).mean() + 1e-12)
+    rng_hi = float(np.percentile(np.concatenate([dv, da]), 99.0))
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.hist(dv, bins=bins, range=(0, rng_hi), density=True,
+            alpha=0.5, label='video', color='steelblue')
+    ax.hist(da, bins=bins, range=(0, rng_hi), density=True,
+            alpha=0.5, label='audio', color='darkorange')
+    ax.set_xlabel('normalised pairwise squared L2')
+    ax.set_ylabel('density')
+    ax.set_title(f'{variant}: pairwise-distance distribution')
+    ax.legend(); ax.grid(alpha=0.3)
+    fig.tight_layout(); fig.savefig(out_path, dpi=150); plt.close(fig)
+
+
+def plot_shepard(V, A, variant, out_path, max_pairs=20000):
+    """Distance-rank scatter. A monotone curve = order-preserving up to a
+    monotone reparameterisation of the metric -- the invariance class
+    quadratic GW operates within. The Spearman annotation summarises it.
+    """
+    DV = ((V[:, None] - V[None, :]) ** 2).sum(-1)
+    DA = ((A[:, None] - A[None, :]) ** 2).sum(-1)
+    dv = upper_tri(DV); da = upper_tri(DA)
+    rv = rankdata(dv); ra = rankdata(da)
+    rho, _ = spearmanr(dv, da)
+    if len(rv) > max_pairs:
+        idx = np.random.default_rng(0).choice(len(rv), max_pairs, replace=False)
+        rv_s, ra_s = rv[idx], ra[idx]
+    else:
+        rv_s, ra_s = rv, ra
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.scatter(rv_s, ra_s, s=2, alpha=0.2, color='steelblue')
+    ax.plot([1, len(rv)], [1, len(rv)], 'r--', lw=1, alpha=0.7,
+            label='isotonic reference')
+    ax.set_xlabel(r'rank of $D_V[i,j]$')
+    ax.set_ylabel(r'rank of $D_A[i,j]$')
+    ax.set_title(f'{variant}: Shepard plot   |   Spearman ρ = {rho:.3f}')
+    ax.legend()
+    fig.tight_layout(); fig.savefig(out_path, dpi=150); plt.close(fig)
+
+
+def plot_mantel_profile(V, A, variant, out_path,
+                        quantiles=(0.05, 0.10, 0.25, 0.50, 1.00)):
+    """Pearson(D_V, D_A) restricted to the closest q-fraction of pairs in V,
+    plotted vs q. A *descending* curve (high local r, low global r) is the
+    GW signature: rigid methods average over scales and miss this.
+    """
+    DV = ((V[:, None] - V[None, :]) ** 2).sum(-1)
+    DA = ((A[:, None] - A[None, :]) ** 2).sum(-1)
+    dv = upper_tri(DV); da = upper_tri(DA)
+    n = len(dv)
+    rv = rankdata(dv)
+    rs = []
+    for q in quantiles:
+        cutoff = max(8, int(np.ceil(q * n)))
+        sel = rv <= cutoff
+        if sel.sum() < 8:
+            rs.append(np.nan); continue
+        r, _ = pearsonr(dv[sel], da[sel])
+        rs.append(r)
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot([100 * q for q in quantiles], rs, 'o-', color='darkgreen', lw=1.5)
+    ax.axhline(0.0, color='gray', lw=0.5, ls=':')
+    ax.set_xlabel('quantile of $D_V$ retained (closest q% of pairs)')
+    ax.set_ylabel(r'Pearson($D_V$, $D_A$) on selected pairs')
+    ax.set_title(f'{variant}: Mantel correlation across distance scales')
+    ax.grid(alpha=0.3)
+    fig.tight_layout(); fig.savefig(out_path, dpi=150); plt.close(fig)
+
+
+def _procrustes_2d(target_2d: np.ndarray, source_2d: np.ndarray) -> np.ndarray:
+    """Best similarity transform (rotation + scale + translation) of source
+    onto target. Used to overlay UMAP(V) and UMAP(A) for the visual residual.
+    """
+    Xc = target_2d - target_2d.mean(0)
+    Yc = source_2d - source_2d.mean(0)
+    M = Yc.T @ Xc
+    try:
+        U, _, Vt = np.linalg.svd(M, full_matrices=False)
+    except np.linalg.LinAlgError:
+        from scipy.linalg import svd as scipy_svd
+        U, _, Vt = scipy_svd(M, full_matrices=False, lapack_driver='gesvd')
+    R = U @ Vt
+    s = float((Xc * (Yc @ R)).sum() / ((Yc * Yc).sum() + 1e-12))
+    return target_2d.mean(0) + s * (Yc @ R)
+
+
+def plot_procrustes_umap_overlay(V, A, labels, variant, out_path,
+                                 max_points=600, n_links=120,
+                                 top_n_classes=12):
+    """Overlay UMAP(V) and Procrustes-aligned UMAP(A). Pair-connectors visualise
+    what's left after the *best rigid* alignment -- precisely what GW is meant
+    to fix non-rigidly. Long residuals = GW has work to do; short residuals =
+    a similarity transform sufficed and GW is overkill.
+    """
+    n = min(len(V), len(A), max_points)
+    rng = np.random.default_rng(0)
+    if len(V) > n:
+        idx = rng.choice(len(V), n, replace=False)
+        V = V[idx]; A = A[idx]; labels = [labels[i] for i in idx]
+
+    V_2d, method = _2d_embedding(V)
+    A_2d, _ = _2d_embedding(A)
+    A_aligned = _procrustes_2d(V_2d, A_2d)
+
+    counts = defaultdict(int)
+    for c in labels:
+        counts[c] += 1
+    top = [c for c, _ in sorted(counts.items(), key=lambda x: -x[1])[:top_n_classes]]
+    cmap = plt.get_cmap('tab20', max(len(top), 1))
+    color_of = {c: cmap(i) for i, c in enumerate(top)}
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+    link_idx = rng.choice(n, size=min(n_links, n), replace=False)
+    for i in link_idx:
+        ax.plot([V_2d[i, 0], A_aligned[i, 0]],
+                [V_2d[i, 1], A_aligned[i, 1]],
+                color='gray', alpha=0.25, lw=0.5)
+    for c in top:
+        mask = np.array([labels[i] == c for i in range(n)])
+        if not mask.any():
+            continue
+        ax.scatter(V_2d[mask, 0], V_2d[mask, 1],
+                   s=14, c=[color_of[c]], marker='o', alpha=0.85,
+                   edgecolors='none', label=f'V · {str(c)[:18]}')
+        ax.scatter(A_aligned[mask, 0], A_aligned[mask, 1],
+                   s=14, c=[color_of[c]], marker='^', alpha=0.85,
+                   edgecolors='none')
+    resid = float(np.linalg.norm(V_2d - A_aligned, ord='fro') ** 2 /
+                  (np.linalg.norm(V_2d, ord='fro') ** 2 + 1e-12))
+    ax.set_title(
+        f'{variant}: Procrustes-aligned {method} overlay '
+        f'(○ V, △ A; relative residual = {resid:.3f})'
+    )
+    ax.set_xticks([]); ax.set_yticks([])
+    handles, lbls = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(handles, lbls, loc='center left',
+                  bbox_to_anchor=(1.02, 0.5), fontsize=7, frameon=False)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
+def _betti0_curve(D: np.ndarray, n_grid: int = 80):
+    """β₀(r) -- connected components of the Vietoris-Rips filtration on D
+    via single-linkage / union-find. Pure numpy, no TDA dependencies.
+    """
+    n = D.shape[0]
+    iu = np.triu_indices(n, k=1)
+    edges = D[iu]
+    order = np.argsort(edges)
+    rs = edges[order]
+    parent = np.arange(n)
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    components = n
+    rs_grid = np.linspace(0.0, float(rs[-1]) if rs.size else 1.0, n_grid)
+    bettis = []
+    j = 0
+    src = iu[0][order]; dst = iu[1][order]
+    for r in rs_grid:
+        while j < len(rs) and rs[j] <= r:
+            a, b = find(int(src[j])), find(int(dst[j]))
+            if a != b:
+                parent[a] = b
+                components -= 1
+            j += 1
+        bettis.append(components)
+    return rs_grid, np.array(bettis)
+
+
+def plot_betti0_overlay(V, A, variant, out_path, max_points=400):
+    """Overlay β₀(r) for V and A on a normalised filtration radius. Matching
+    curves = matching merge dynamics = same global connectedness profile,
+    a coarse but dependency-free topological agreement check.
+    """
+    n = min(len(V), len(A), max_points)
+    if len(V) > n:
+        idx = np.random.default_rng(0).choice(len(V), n, replace=False)
+        V, A = V[idx], A[idx]
+    DV = ((V[:, None] - V[None, :]) ** 2).sum(-1)
+    DA = ((A[:, None] - A[None, :]) ** 2).sum(-1)
+    DV = DV / (DV.mean() + 1e-12)
+    DA = DA / (DA.mean() + 1e-12)
+    rv, bv = _betti0_curve(DV)
+    ra, ba = _betti0_curve(DA)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(rv, bv, label='video', color='steelblue', lw=1.5)
+    ax.plot(ra, ba, label='audio', color='darkorange', lw=1.5)
+    ax.set_xlabel('filtration radius r (mean-normalised)')
+    ax.set_ylabel(r'$\beta_0(r)$ -- connected components')
+    ax.set_yscale('log'); ax.grid(alpha=0.3); ax.legend()
+    ax.set_title(f'{variant}: Betti-0 curves (single-linkage Vietoris-Rips)')
+    fig.tight_layout(); fig.savefig(out_path, dpi=150); plt.close(fig)
+
+
+def plot_paired_umap(V, A, labels, variant, out_path,
+                     top_n_classes=12, max_points=2000, cka=None, proc=None):
+    """Side-by-side labelled 2D embeddings of V and A.
+
+    Visual isometry probe: matching cluster topologies across panels mean V
+    and A share relational structure (GW has signal to align). Mismatched
+    topologies mean GW is forcing alignment that isn't natively there --
+    a signal that the chosen video/audio encoders don't share geometry and
+    that swapping encoders may matter more than tuning GW.
+    """
+    # subsample for speed
+    n = min(len(V), len(A), max_points)
+    rng = np.random.default_rng(0)
+    if len(V) > n:
+        idx = rng.choice(len(V), n, replace=False)
+        V = V[idx]; A = A[idx]
+        labels = [labels[i] for i in idx]
+
+    V_2d, method = _2d_embedding(V)
+    A_2d, _ = _2d_embedding(A)
+
+    # pick top-N frequent classes; everything else goes gray.
+    counts = defaultdict(int)
+    for c in labels:
+        counts[c] += 1
+    top = [c for c, _ in sorted(counts.items(), key=lambda x: -x[1])[:top_n_classes]]
+    cmap = plt.get_cmap('tab20', len(top))
+    color_of = {c: cmap(i) for i, c in enumerate(top)}
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
+    for ax, X2, side in zip(axes, [V_2d, A_2d], ['video', 'audio']):
+        # gray background points (everything not in top-N)
+        gray_mask = np.array([labels[i] not in color_of for i in range(len(labels))])
+        if gray_mask.any():
+            ax.scatter(X2[gray_mask, 0], X2[gray_mask, 1],
+                       s=6, c='lightgray', alpha=0.4, linewidths=0)
+        for c in top:
+            mask = np.array([labels[i] == c for i in range(len(labels))])
+            if not mask.any():
+                continue
+            ax.scatter(X2[mask, 0], X2[mask, 1],
+                       s=10, c=[color_of[c]], alpha=0.85, linewidths=0,
+                       label=str(c))
+        ax.set_title(f'{side} ({method})')
+        ax.set_xticks([]); ax.set_yticks([])
+
+    suptitle = f'{variant}: paired {method} of V and A'
+    if cka is not None and proc is not None and not (np.isnan(cka) or np.isnan(proc)):
+        suptitle += f'   |   CKA={cka:.3f}   Procrustes resid={proc:.3f}'
+    fig.suptitle(suptitle, fontsize=11)
+
+    # single legend across both axes
+    handles, lbls = axes[0].get_legend_handles_labels()
+    if handles:
+        # truncate long labels for legibility
+        short = [str(l)[:28] + ('…' if len(str(l)) > 28 else '') for l in lbls]
+        fig.legend(handles, short, loc='lower center', ncol=min(6, len(handles)),
+                   fontsize=7, frameon=False, bbox_to_anchor=(0.5, -0.02))
+
+    fig.tight_layout(rect=[0, 0.05, 1, 0.96])
+    fig.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    return method
 
 
 def plot_gw_perm(rows, out_path):
@@ -401,6 +698,17 @@ def main():
         er_a = effective_rank(A)
         cka = linear_cka(V, A)
         proc = procrustes_residual(V, A)
+        plot_paired_umap(
+            V, A, labels, v, out / f'umap_{v}.png',
+            cka=cka, proc=proc,
+        )
+        plot_pairwise_dist_overlay(V, A, v, out / f'dist_overlay_{v}.png')
+        plot_shepard(V, A, v, out / f'shepard_{v}.png')
+        plot_mantel_profile(V, A, v, out / f'mantel_{v}.png')
+        plot_procrustes_umap_overlay(
+            V, A, labels, v, out / f'procrustes_umap_{v}.png',
+        )
+        plot_betti0_overlay(V, A, v, out / f'betti0_{v}.png')
         rows.append({
             'variant': v,
             'pearson_DV_DA': r_p,
