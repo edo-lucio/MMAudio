@@ -37,9 +37,9 @@ from multiprocessing import Pool
 # AudioCaps splits live in the official GitHub repo. If the URLs ever
 # change, edit these and rerun.
 AUDIOCAPS_URLS = {
-    "train": "https://raw.githubusercontent.com/cdminix/audiocaps/main/dataset/train.csv",
-    "val":   "https://raw.githubusercontent.com/cdminix/audiocaps/main/dataset/val.csv",
-    "test":  "https://raw.githubusercontent.com/cdminix/audiocaps/main/dataset/test.csv",
+    "train": "https://raw.githubusercontent.com/cdjkim/audiocaps/master/dataset/train.csv",
+    "val":   "https://raw.githubusercontent.com/cdjkim/audiocaps/master/dataset/val.csv",
+    "test":  "https://raw.githubusercontent.com/cdjkim/audiocaps/master/dataset/test.csv",
 }
 
 OUTPUT_DIR = "./data/audiocaps/audio"
