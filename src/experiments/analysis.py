@@ -150,6 +150,30 @@ def effective_rank(S: np.ndarray, eps: float = 1e-12) -> float:
     return float(np.exp(-(p * np.log(p)).sum()))
 
 
+def safe_svd(X: np.ndarray) -> np.ndarray:
+    """SVD with NaN/Inf sanitisation and a gesdd→gesvd fallback.
+
+    Collapsed reps after a failed GW run frequently produce non-finite values
+    or near-degenerate matrices that trip the default gesdd LAPACK driver
+    with "SVD did not converge". gesvd is slower but numerically robust.
+    """
+    X = np.asarray(X, dtype=np.float64)
+    if not np.isfinite(X).all():
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    try:
+        return np.linalg.svd(X, compute_uv=False)
+    except np.linalg.LinAlgError:
+        try:
+            from scipy.linalg import svd as scipy_svd
+            return scipy_svd(X, compute_uv=False, lapack_driver='gesvd')
+        except Exception:
+            # Last-resort: SVD of X^T X, take sqrt of eigenvalues.
+            G = X.T @ X if X.shape[0] >= X.shape[1] else X @ X.T
+            w = np.linalg.eigvalsh(G)
+            w = np.clip(w, 0.0, None)
+            return np.sqrt(w[::-1])
+
+
 def cmd_geometry(args):
     """Computes SVD-based metrics from saved-out projected features.
     Expects each run to have <run>/gw_features.pt = dict(video=(N,D), audio=(N,D), labels=list)."""
@@ -162,7 +186,10 @@ def cmd_geometry(args):
         feats = torch.load(path, map_location='cpu', weights_only=True)
         for mod, key in [('video', 'video'), ('audio', 'audio')]:
             X = feats[key].numpy()
-            S = np.linalg.svd(X, compute_uv=False)
+            S = safe_svd(X)
+            if S.size == 0 or S[0] <= 0.0:
+                summary[f'{tag}_{mod}_erank'] = 0.0
+                continue
             summary[f'{tag}_{mod}_erank'] = effective_rank(S)
             ax = axes[0 if mod == 'video' else 1]
             ax.semilogy(S / S[0], label=f'{tag}')
