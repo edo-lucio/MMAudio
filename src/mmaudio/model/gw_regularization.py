@@ -215,27 +215,68 @@ def _extract_representations(
     x1: Tensor,
     sync_f_raw: Optional[Tensor] = None,
     text_f_raw: Optional[Tensor] = None,
+    audio_encoder: str = "vae",
+    clap_f_raw: Optional[Tensor] = None,
 ) -> tuple[Tensor, Tensor]:
     """Pull (video_repr, audio_repr), each (B, D), according to variant.
 
-    Uses the DDP-unwrapped module (caller must pass `network.module` if DDP).
+    The ``audio_encoder`` switch controls what feeds the *audio side* of the
+    GW objective:
+
+      * ``"vae"`` (default): the audio side is derived from the VAE-latent
+        target ``x1`` via the trainable ``audio_input_proj`` already used
+        by the flow-matching forward. This is the original behaviour.
+      * ``"clap"``: ignore ``x1`` on the audio side and use precomputed
+        LAION-CLAP audio embeddings ``clap_f_raw`` of shape (B, 512). The
+        embeddings are passed through a learnable ``clap_proj`` that the
+        caller is responsible for adding to the network module. The
+        hypothesis is that CLAP's text-aware audio space shares more
+        structure with CLIP's text-aware video space than the VAE-latent
+        space does, making the GW alignment easier to satisfy.
+
+    The video side is unchanged across the two encoders. ``clap_f_raw``
+    must be provided whenever ``audio_encoder == "clap"``.
+
+    Uses the DDP-unwrapped module (caller must pass ``network.module`` if
+    DDP).
     """
+    # CLAP-side audio representation: shared across all variants when
+    # audio_encoder='clap', so we resolve it once here.
+    a_clap: Optional[Tensor] = None
+    if audio_encoder == "clap":
+        if clap_f_raw is None:
+            raise ValueError(
+                "audio_encoder='clap' requires clap_f_raw; the dataloader "
+                "must produce CLAP embeddings (see "
+                "src/training/extract_clap_features.py)."
+            )
+        clap_proj = getattr(network, "clap_proj", None)
+        if clap_proj is None:
+            raise AttributeError(
+                "audio_encoder='clap' selected but the network has no "
+                "`clap_proj` layer. Add `nn.Linear(512, hidden_dim)` "
+                "(or a small MLP) to MMAudio.__init__ when "
+                "cfg.gw_regularization.audio_encoder == 'clap'."
+            )
+        # CLAP outputs are already a sample-level summary; no token pooling.
+        a_clap = clap_proj(clap_f_raw)
+
     if variant == "global":
         # raw CLIP avg-pool vs raw (normalized) x1 avg-pool
         v = clip_f_raw.mean(dim=1)
-        a = x1.mean(dim=1)
+        a = a_clap if a_clap is not None else x1.mean(dim=1)
     elif variant == "projected":
         v = network.clip_input_proj(clip_f_raw).mean(dim=1)
-        a = network.audio_input_proj(x1).mean(dim=1)
+        a = a_clap if a_clap is not None else network.audio_input_proj(x1).mean(dim=1)
     elif variant == "c_g":
         # clip_f_c side of the global conditioning vector
         clip_proj = network.clip_input_proj(clip_f_raw)  # (B, 64, D)
         v = network.clip_cond_proj(clip_proj.mean(dim=1))  # (B, D)
-        a = network.audio_input_proj(x1).mean(dim=1)
+        a = a_clap if a_clap is not None else network.audio_input_proj(x1).mean(dim=1)
     elif variant == "fused":
         # same reps as projected; cross-domain cost handled by caller
         v = network.clip_input_proj(clip_f_raw).mean(dim=1)
-        a = network.audio_input_proj(x1).mean(dim=1)
+        a = a_clap if a_clap is not None else network.audio_input_proj(x1).mean(dim=1)
     else:
         raise ValueError(f"Unknown GW variant: {variant}")
     return v, a
@@ -256,6 +297,8 @@ def compute_gw_regularization(
     anticollapse_weight: float = 0.0,
     anticollapse_eta: float = 1e-3,
     anticollapse_target: str = "both",
+    audio_encoder: str = "vae",
+    clap_f_raw: Optional[Tensor] = None,
 ) -> tuple[Tensor, Optional[Tensor], Tensor]:
     """Compute GW loss over the subset of the batch that has real video features.
 
@@ -280,10 +323,20 @@ def compute_gw_regularization(
 
     clip_sub = clip_f_raw.index_select(0, idx)
     x1_sub = x1.index_select(0, idx)
+    clap_sub: Optional[Tensor] = None
+    if audio_encoder == "clap":
+        if clap_f_raw is None:
+            # Fall through to vae behaviour rather than crash mid-batch;
+            # logged so the misconfiguration is visible.
+            audio_encoder = "vae"
+        else:
+            clap_sub = clap_f_raw.index_select(0, idx)
 
     with torch.cuda.amp.autocast(enabled=False):
         clip_sub = clip_sub.float()
         x1_sub = x1_sub.float()
+        if clap_sub is not None:
+            clap_sub = clap_sub.float()
 
         # got_token: per-sample fused-GW on post-projection token graphs
         # (Chen et al. 2020, GOT). Aligns intra-video token relations to
@@ -315,7 +368,10 @@ def compute_gw_regularization(
             # rank-1 batch collapse the penalty was designed to repel.
             return gw_loss, T, zero
 
-        v, a = _extract_representations(network, variant, clip_sub, x1_sub)
+        v, a = _extract_representations(
+            network, variant, clip_sub, x1_sub,
+            audio_encoder=audio_encoder, clap_f_raw=clap_sub,
+        )
 
         # spectral anti-collapse penalty on the un-detached projector outputs
         ac = zero

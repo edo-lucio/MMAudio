@@ -84,6 +84,19 @@ gw_regularization:
   anticollapse_weight: 1.0e-1
   anticollapse_eta: 1.0e-4
   anticollapse_target: both # video | audio | both
+  # Audio-side encoder for the GW objective. 'vae' uses the VAE-latent
+  # target x1 via the existing audio_input_proj (default behaviour).
+  # 'clap' substitutes precomputed LAION-CLAP audio embeddings (512-d per
+  # clip) routed through a learnable network.clap_proj. The hypothesis is
+  # that CLAP's text-aware audio space shares more structure with CLIP's
+  # text-aware video space than the VAE-latent space does. Selecting
+  # 'clap' requires:
+  #   1. Pre-extraction of CLAP features via
+  #      src/training/extract_clap_features.py for every training split.
+  #   2. The dataloader producing a 'clap_features' field per batch.
+  #   3. MMAudio.__init__ adding `self.clap_proj = nn.Linear(512, hidden_dim)`
+  #      (or a small MLP) when this flag is 'clap'.
+  audio_encoder: vae        # vae | clap
 
 # checkpoint paths to external modules
 vae_16k_ckpt: ./ext_weights/v1-16.pth

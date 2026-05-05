@@ -30,16 +30,46 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 # ---------- shared helpers ----------
 
 def read_scalars(run_dir: Path, tags: list[str]) -> dict[str, pd.DataFrame]:
+    """Aggregate scalar events across every events.out.tfevents.* file in
+    run_dir (and any subdirectory). Resumed / interrupted runs accumulate
+    multiple event files in the same logdir; reading only the latest one
+    silently drops the rest of the training history.
+
+    For each requested tag we concatenate the scalar series from every file,
+    sort by step, and drop duplicate (step, tag) entries keeping the most
+    recently written value. Returns {tag: DataFrame[step, tag]}.
+    """
     ev_files = sorted(run_dir.rglob('events.out.tfevents.*'))
     if not ev_files:
         return {}
-    ea = EventAccumulator(str(ev_files[-1]))
-    ea.Reload()
-    out = {}
-    for tag in tags:
-        if tag in ea.Tags().get('scalars', []):
-            rows = [(e.step, e.value) for e in ea.Scalars(tag)]
-            out[tag] = pd.DataFrame(rows, columns=['step', tag])
+
+    # Group event files by their parent directory and let EventAccumulator
+    # merge files within each logdir. This handles the common case where all
+    # event files sit directly under run_dir.
+    logdirs = sorted({f.parent for f in ev_files})
+
+    per_tag_frames: dict[str, list[pd.DataFrame]] = {tag: [] for tag in tags}
+    for logdir in logdirs:
+        ea = EventAccumulator(str(logdir))
+        ea.Reload()
+        scalar_tags = ea.Tags().get('scalars', [])
+        for tag in tags:
+            if tag in scalar_tags:
+                rows = [(e.wall_time, e.step, e.value) for e in ea.Scalars(tag)]
+                df = pd.DataFrame(rows, columns=['wall_time', 'step', tag])
+                per_tag_frames[tag].append(df)
+
+    out: dict[str, pd.DataFrame] = {}
+    for tag, frames in per_tag_frames.items():
+        if not frames:
+            continue
+        df = pd.concat(frames, ignore_index=True)
+        # If the same step was written by two sessions (e.g. resume from
+        # checkpoint replays a few steps), keep the latest by wall_time.
+        df = df.sort_values('wall_time').drop_duplicates(
+            subset='step', keep='last'
+        ).sort_values('step').reset_index(drop=True)
+        out[tag] = df[['step', tag]]
     return out
 
 
