@@ -1,18 +1,20 @@
 \section{Methodology}
 \label{sec:methodology}
 
-This section formalises the integration of a Gromov--Wasserstein
+This section formalises the integration of a Gromov-Wasserstein
 regularizer into a conditional flow-matching objective. We first
-recall the flow-matching loss as instantiated in MMAudio
+recall the flow-matching loss
 \citep{cheng_2025_mmaudio}, then define the four families of
 intra-modal pairwise-distance matrices that feed the regularizer,
 the entropic and fused-entropic Gromov--Wasserstein objectives, the
 Sinkhorn solver used to evaluate them, and the schedule that
-controls their contribution to training. Throughout, we treat
+controls their contribution to training. 
+
+As the backbone of our experiments, we rely entirely on MMAudio \cite{cheng_2025_mmaudio}. The choice of MMAudio as the the backbone are motivated by (i) its state-of-the-art generative performances (ii) its lack of geometric relational awareness and (iii) its domain-relevancy with the previous experiments discussed in our thesis. 
+Throughout, we treat
 MMAudio purely as a conditioning architecture: a means of
 materialising a video-conditioned generative process whose
-representations the GW loss can shape. The thesis claim is about
-the regularizer; the backbone is a substrate.
+representations the GW loss can shape. Our claims only concern the contributions of regularization methods on the backbone, but we are argue that the same methodology can be applied to the loss of any conditional generative model. 
 
 \subsection{Backbone objective: conditional flow matching}
 \label{sec:methodology:fm}
@@ -97,13 +99,10 @@ of the two streams.
 \paragraph{The MMAudio backbone.}
 We instantiate the velocity field $v_\theta$ via the open-source
 \textbf{MMAudio} system of \citet{cheng_2025_mmaudio}, which at the
-time of writing is the state of the art among public V2A models on
+time of writing is the state of the art among public V2A models trained on
 VGGSound and surpasses earlier flow-matching V2A systems such as
-Frieren \citep{wang_2024_frieren} (channel-level fusion +
-reflow). MMAudio is used here purely as a substrate: it provides
-a strong, well-validated pointwise-alignment baseline against
-which the relational regularizer can be measured, but it is not
-itself the object of study. Three of its design choices are
+Frieren \citep{wang2025frierenefficientvideotoaudiogeneration} (channel-level fusion +
+reflow). Three of its design choices are
 load-bearing for our methodology and worth describing in full.
 
 \emph{Input encoders.} The conditioning tuple
@@ -124,11 +123,11 @@ This matters for the regularizer of \S\ref{sec:methodology:reps},
 which acts precisely at these projection layers.
 
 \emph{Backbone architecture.} The flow predictor is a stack of
-$N_1$ \emph{multimodal MM-DiT blocks} adapted from the
+$N_1$ {multimodal MM-DiT blocks} adapted from the
 text-to-image rectified-flow transformers of
 \citet{esser_2024_scaling}, in which separate weights process the
-visual / text / audio streams while a single \emph{joint
-attention} operation lets the three streams exchange information,
+visual / text / audio streams while a single joint
+attention operation lets the three streams exchange information,
 followed by $N_2$ audio-only transformer blocks. We use the
 default S-16kHz configuration ($N_1 = 4$, $N_2 = 8$, hidden
 dimension $h = 448$, $157$M trainable parameters). Cross-modal
@@ -180,6 +179,8 @@ the correct token of the other stream by attention and adaLN, but
 the geometry of the streams is left to emerge incidentally from
 the token-wise regression in \eqref{eq:fm_loss}. The regularizer
 below targets exactly this gap.
+
+In our experiments, we focus only on audio-visual regularization through the Gromov-Wasserstein term as the text conditioning signal only as 
 
 \subsection{Representation variants and the relational signal}
 \label{sec:methodology:reps}

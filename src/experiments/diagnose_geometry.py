@@ -114,6 +114,126 @@ def effective_rank(X, eps=1e-12):
     return float(np.exp(-(p * np.log(p)).sum()))
 
 
+def linear_cka(V, A):
+    """Centered Kernel Alignment with linear kernel — relational alignment in [0, 1]."""
+    Vc = V - V.mean(0, keepdims=True)
+    Ac = A - A.mean(0, keepdims=True)
+    KV = Vc @ Vc.T
+    KA = Ac @ Ac.T
+    hsic = (KV * KA).sum()
+    denom = np.sqrt((KV * KV).sum() * (KA * KA).sum()) + 1e-12
+    return float(hsic / denom)
+
+
+def procrustes_residual(V, A):
+    """Best orthogonal alignment of V→A: returns relative residual ∈ [0, 1].
+
+    A residual ≪ 1 means a single rotation already aligns the spaces — entropic
+    GW is then redundant and can introduce bias.
+    """
+    Vc = V - V.mean(0, keepdims=True)
+    Ac = A - A.mean(0, keepdims=True)
+    if Vc.shape[1] != Ac.shape[1]:
+        # pad shorter side with zeros so we can compare
+        d = max(Vc.shape[1], Ac.shape[1])
+        Vp = np.zeros((Vc.shape[0], d)); Vp[:, :Vc.shape[1]] = Vc
+        Ap = np.zeros((Ac.shape[0], d)); Ap[:, :Ac.shape[1]] = Ac
+        Vc, Ac = Vp, Ap
+    M = Ac.T @ Vc
+    U, _, Vt = np.linalg.svd(M, full_matrices=False)
+    R = U @ Vt
+    resid = np.linalg.norm(Vc @ R.T - Ac, ord='fro') ** 2
+    denom = np.linalg.norm(Ac, ord='fro') ** 2 + 1e-12
+    return float(resid / denom)
+
+
+def gw_permutation_test(V_np, A_np, n_perm=20, batch=64, fused=False, alpha=0.5):
+    """GW(V, A) vs GW(V, shuffle(A)). Tight gap = no relational signal to align."""
+    n = len(V_np)
+    if n < batch * 2:
+        return float('nan'), float('nan'), float('nan')
+    V = torch.from_numpy(V_np).cuda().float()
+    A = torch.from_numpy(A_np).cuda().float()
+    rng = np.random.default_rng(0)
+
+    def _gw(v, a):
+        DV = _normalize_dist(pairwise_distances(v))
+        DA = _normalize_dist(pairwise_distances(a))
+        if fused:
+            vn = torch.nn.functional.normalize(v, dim=-1)
+            an = torch.nn.functional.normalize(a, dim=-1)
+            C = 1.0 - vn @ an.t()
+            loss, _ = fused_gw_loss(DV, DA, C, alpha=alpha)
+        else:
+            loss, _ = entropic_gw_loss(DV, DA)
+        return float(loss.item())
+
+    paired, shuffled = [], []
+    for _ in range(n_perm):
+        idx = rng.choice(n, size=batch, replace=False)
+        v = V[idx]
+        a = A[idx]
+        paired.append(_gw(v, a))
+        perm = rng.permutation(batch)
+        shuffled.append(_gw(v, a[perm]))
+    paired = np.array(paired); shuffled = np.array(shuffled)
+    z = (shuffled.mean() - paired.mean()) / (paired.std() + shuffled.std() + 1e-12)
+    return float(paired.mean()), float(shuffled.mean()), float(z)
+
+
+def plot_svd_spectra(reps_by_variant, out_path):
+    """Log-scale singular values for V and A across variants — exposes mode collapse."""
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharey=True)
+    for ax, side in zip(axes, ['video', 'audio']):
+        for v, (V, A) in reps_by_variant.items():
+            X = V if side == 'video' else A
+            S = np.linalg.svd(X - X.mean(0, keepdims=True), compute_uv=False)
+            S = S / (S[0] + 1e-12)
+            ax.semilogy(S, label=v, lw=1.5)
+        ax.set_title(f'{side} singular spectrum (normalized)')
+        ax.set_xlabel('index'); ax.grid(alpha=0.3)
+    axes[0].set_ylabel(r'$\sigma_i / \sigma_0$')
+    axes[0].legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_procrustes_cka_bar(rows, out_path):
+    fig, ax = plt.subplots(figsize=(7, 4))
+    variants = [r['variant'] for r in rows]
+    x = np.arange(len(variants))
+    w = 0.35
+    ax.bar(x - w/2, [r['linear_cka'] for r in rows], width=w, label='linear CKA')
+    ax.bar(x + w/2, [r['procrustes_resid'] for r in rows], width=w, label='Procrustes residual')
+    ax.set_xticks(x); ax.set_xticklabels(variants)
+    ax.set_ylabel('value'); ax.set_ylim(0, 1.05)
+    ax.set_title('CKA (higher = more aligned) vs Procrustes residual (lower = more aligned)')
+    ax.legend(); ax.grid(alpha=0.3, axis='y')
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_gw_perm(rows, out_path):
+    fig, ax = plt.subplots(figsize=(7, 4))
+    variants = [r['variant'] for r in rows]
+    x = np.arange(len(variants))
+    w = 0.35
+    ax.bar(x - w/2, [r['gw_paired_mean'] for r in rows], width=w, label='paired')
+    ax.bar(x + w/2, [r['gw_shuffled_mean'] for r in rows], width=w, label='shuffled')
+    for i, r in enumerate(rows):
+        ax.text(i, max(r['gw_paired_mean'], r['gw_shuffled_mean']),
+                f"z={r['gw_perm_z']:.2f}", ha='center', va='bottom', fontsize=8)
+    ax.set_xticks(x); ax.set_xticklabels(variants)
+    ax.set_ylabel('GW loss')
+    ax.set_title('GW(V, A) vs GW(V, shuffle(A)) — tight gap = no relational signal')
+    ax.legend(); ax.grid(alpha=0.3, axis='y')
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 def class_kendall_tau(V, A, labels):
     """Kendall-tau between class-pair mean distances on video vs audio sides."""
     by_class = defaultdict(list)
@@ -263,8 +383,10 @@ def main():
     rows = []
     knn_by_variant = {}
     scatter_info = {}
+    reps_by_variant = {}
     for v in VARIANTS:
         V, A, labels = gather_reps(net, dset, v, args.max_samples)
+        reps_by_variant[v] = (V, A)
         r_p, r_s = plot_scatter(V, A, v, out / f'scatter_{v}.png')
         scatter_info[v] = (r_p, r_s)
 
@@ -273,15 +395,23 @@ def main():
             knn_by_variant[v][k] = knn_jaccard(V, A, k)
 
         gw_mean, gw_std = gw_value(V, A, fused=(v == 'fused'))
+        gw_paired, gw_shuffled, gw_z = gw_permutation_test(V, A, fused=(v == 'fused'))
         tau = class_kendall_tau(V, A, labels)
         er_v = effective_rank(V)
         er_a = effective_rank(A)
+        cka = linear_cka(V, A)
+        proc = procrustes_residual(V, A)
         rows.append({
             'variant': v,
             'pearson_DV_DA': r_p,
             'spearman_DV_DA': r_s,
             'gw_init_mean': gw_mean,
             'gw_init_std': gw_std,
+            'gw_paired_mean': gw_paired,
+            'gw_shuffled_mean': gw_shuffled,
+            'gw_perm_z': gw_z,
+            'linear_cka': cka,
+            'procrustes_resid': proc,
             'class_kendall_tau': tau,
             'erank_video': er_v,
             'erank_audio': er_a,
@@ -293,6 +423,9 @@ def main():
     df.to_latex(out / 'metrics.tex', index=False, float_format='%.3f')
 
     plot_knn_curve({'ks': args.ks, 'knn': knn_by_variant}, out / 'knn.png')
+    plot_svd_spectra(reps_by_variant, out / 'svd_spectra.png')
+    plot_procrustes_cka_bar(rows, out / 'cka_procrustes.png')
+    plot_gw_perm(rows, out / 'gw_permutation.png')
     diag = plot_coupling_heatmap(net, dset, out / 'coupling.png', variant='global')
 
     print(df.to_string(index=False))
