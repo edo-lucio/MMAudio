@@ -174,18 +174,133 @@ def safe_svd(X: np.ndarray) -> np.ndarray:
             return np.sqrt(w[::-1])
 
 
+def _upper_tri(M: np.ndarray) -> np.ndarray:
+    iu = np.triu_indices_from(M, k=1)
+    return M[iu]
+
+
+def _linear_cka(V: np.ndarray, A: np.ndarray) -> float:
+    Vc = V - V.mean(0, keepdims=True)
+    Ac = A - A.mean(0, keepdims=True)
+    KV = Vc @ Vc.T
+    KA = Ac @ Ac.T
+    hsic = (KV * KA).sum()
+    denom = np.sqrt((KV * KV).sum() * (KA * KA).sum()) + 1e-12
+    return float(hsic / denom)
+
+
+def _procrustes_residual(V: np.ndarray, A: np.ndarray) -> float:
+    Vc = V - V.mean(0, keepdims=True)
+    Ac = A - A.mean(0, keepdims=True)
+    if Vc.shape[1] != Ac.shape[1]:
+        d = max(Vc.shape[1], Ac.shape[1])
+        Vp = np.zeros((Vc.shape[0], d)); Vp[:, :Vc.shape[1]] = Vc
+        Ap = np.zeros((Ac.shape[0], d)); Ap[:, :Ac.shape[1]] = Ac
+        Vc, Ac = Vp, Ap
+    M = Ac.T @ Vc
+    try:
+        U, _, Vt = np.linalg.svd(M, full_matrices=False)
+    except np.linalg.LinAlgError:
+        from scipy.linalg import svd as scipy_svd
+        U, _, Vt = scipy_svd(M, full_matrices=False, lapack_driver='gesvd')
+    R = U @ Vt
+    resid = np.linalg.norm(Vc @ R.T - Ac, ord='fro') ** 2
+    denom = np.linalg.norm(Ac, ord='fro') ** 2 + 1e-12
+    return float(resid / denom)
+
+
+def _pairwise_sq_l2(X: np.ndarray) -> np.ndarray:
+    sq = (X * X).sum(-1, keepdims=True)
+    D = sq + sq.T - 2.0 * (X @ X.T)
+    return np.clip(D, 0.0, None)
+
+
+def _knn_jaccard(V: np.ndarray, A: np.ndarray, k: int) -> float:
+    DV = _pairwise_sq_l2(V); DA = _pairwise_sq_l2(A)
+    np.fill_diagonal(DV, np.inf); np.fill_diagonal(DA, np.inf)
+    nn_v = np.argsort(DV, axis=1)[:, :k]
+    nn_a = np.argsort(DA, axis=1)[:, :k]
+    jacc = []
+    for i in range(len(V)):
+        sv, sa = set(nn_v[i].tolist()), set(nn_a[i].tolist())
+        u = len(sv | sa)
+        jacc.append(len(sv & sa) / u if u else 0.0)
+    return float(np.mean(jacc))
+
+
+def _gw_permutation_numpy(V: np.ndarray, A: np.ndarray,
+                          n_perm: int = 20, batch: int = 64,
+                          epsilon: float = 0.1, num_iter: int = 5):
+    """Lightweight numpy GW permutation test.
+
+    Mirrors the entropic GW objective from mmaudio.model.gw_regularization
+    using a small-batch Sinkhorn loop so we don't drag the full training
+    stack into post-hoc analysis.
+    """
+    n = len(V)
+    if n < batch * 2:
+        return float('nan'), float('nan'), float('nan')
+    rng = np.random.default_rng(0)
+
+    def _normalize(D):
+        m = max(D.mean(), 1e-8)
+        return D / m
+
+    def _gw(v, a):
+        DV = _normalize(_pairwise_sq_l2(v))
+        DA = _normalize(_pairwise_sq_l2(a))
+        B = DV.shape[0]
+        p = np.full(B, 1.0 / B); q = np.full(B, 1.0 / B)
+        T = np.outer(p, q)
+        for _ in range(num_iter):
+            C = -2.0 * DV @ T @ DA.T
+            C = C - C.max()
+            K = np.exp(-C / epsilon)
+            u = np.ones(B); v_s = np.ones(B)
+            for _ in range(20):
+                u = p / (K @ v_s + 1e-30)
+                v_s = q / (K.T @ u + 1e-30)
+            T = u[:, None] * K * v_s[None, :]
+        return _frob_quad(DV, DA, T)
+
+    def _frob_quad(DV, DA, T):
+        # <L(DV,DA) ⊗ T, T>_F  with L(a,b) = (a-b)^2.
+        # Reduce to:  sum DV^2 p p^T + q^T DA^2 q  - 2 tr(DV T DA T^T)
+        a = (DV * DV).sum(axis=1)
+        b = (DA * DA).sum(axis=1)
+        p = T.sum(axis=1); q = T.sum(axis=0)
+        c = a @ p + b @ q - 2.0 * (DV @ T @ DA.T * T).sum()
+        return float(c)
+
+    paired, shuffled = [], []
+    for _ in range(n_perm):
+        idx = rng.choice(n, size=batch, replace=False)
+        v = V[idx]; a = A[idx]
+        paired.append(_gw(v, a))
+        perm = rng.permutation(batch)
+        shuffled.append(_gw(v, a[perm]))
+    paired = np.array(paired); shuffled = np.array(shuffled)
+    z = (shuffled.mean() - paired.mean()) / (paired.std() + shuffled.std() + 1e-12)
+    return float(paired.mean()), float(shuffled.mean()), float(z)
+
+
 def cmd_geometry(args):
     """Computes SVD-based metrics from saved-out projected features.
     Expects each run to have <run>/gw_features.pt = dict(video=(N,D), audio=(N,D), labels=list)."""
     out = Path(args.out or 'analysis/geometry.png')
     out.parent.mkdir(parents=True, exist_ok=True)
+
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     summary = {}
+    reps = {}  # tag -> {'video': V, 'audio': A}
     for tag, path in [('baseline', args.baseline), ('gw', args.gw)]:
         feats = torch.load(path, map_location='cpu', weights_only=True)
+        reps[tag] = {}
         for mod, key in [('video', 'video'), ('audio', 'audio')]:
-            X = feats[key].numpy()
+            X = feats[key].numpy().astype(np.float64, copy=False)
+            X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+            reps[tag][mod] = X
             S = safe_svd(X)
             if S.size == 0 or S[0] <= 0.0:
                 summary[f'{tag}_{mod}_erank'] = 0.0
@@ -200,9 +315,75 @@ def cmd_geometry(args):
         ax.legend()
     fig.tight_layout()
     fig.savefig(out, dpi=150)
+    plt.close(fig)
+
+    # ── post-hoc cross-modal geometry probes (CKA, Procrustes, GW perm, kNN) ──
+    probes = {}
+    for tag in ('baseline', 'gw'):
+        V, A = reps[tag]['video'], reps[tag]['audio']
+        n = min(len(V), len(A))
+        V, A = V[:n], A[:n]
+        if n < 8:
+            continue
+        try:
+            cka = _linear_cka(V, A)
+        except Exception:
+            cka = float('nan')
+        try:
+            proc = _procrustes_residual(V, A)
+        except Exception:
+            proc = float('nan')
+        try:
+            knn10 = _knn_jaccard(V, A, k=min(10, n - 1))
+        except Exception:
+            knn10 = float('nan')
+        try:
+            gw_p, gw_s, gw_z = _gw_permutation_numpy(V, A, batch=min(64, n // 2))
+        except Exception:
+            gw_p = gw_s = gw_z = float('nan')
+        probes[tag] = dict(
+            linear_cka=cka, procrustes_resid=proc, knn_jaccard_at10=knn10,
+            gw_paired=gw_p, gw_shuffled=gw_s, gw_perm_z=gw_z,
+        )
+        summary.update({f'{tag}_{k}': v for k, v in probes[tag].items()})
+
+    if probes:
+        # CKA + Procrustes bar chart (baseline vs gw)
+        out_cka = out.parent / 'cka_procrustes.png'
+        fig, ax = plt.subplots(figsize=(7, 4))
+        tags = list(probes.keys())
+        x = np.arange(len(tags)); w = 0.35
+        ax.bar(x - w/2, [probes[t]['linear_cka'] for t in tags], width=w, label='linear CKA')
+        ax.bar(x + w/2, [probes[t]['procrustes_resid'] for t in tags], width=w, label='Procrustes residual')
+        ax.set_xticks(x); ax.set_xticklabels(tags)
+        ax.set_ylim(0, 1.05); ax.grid(alpha=0.3, axis='y')
+        ax.set_title('CKA (↑ aligned) vs Procrustes residual (↓ aligned)')
+        ax.legend()
+        fig.tight_layout(); fig.savefig(out_cka, dpi=150); plt.close(fig)
+
+        # GW permutation bar chart
+        out_perm = out.parent / 'gw_permutation.png'
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.bar(x - w/2, [probes[t]['gw_paired'] for t in tags], width=w, label='paired')
+        ax.bar(x + w/2, [probes[t]['gw_shuffled'] for t in tags], width=w, label='shuffled')
+        for i, t in enumerate(tags):
+            top = max(probes[t]['gw_paired'], probes[t]['gw_shuffled'])
+            ax.text(i, top, f"z={probes[t]['gw_perm_z']:.2f}",
+                    ha='center', va='bottom', fontsize=8)
+        ax.set_xticks(x); ax.set_xticklabels(tags); ax.grid(alpha=0.3, axis='y')
+        ax.set_title('GW(V, A) vs GW(V, shuffle(A)) — tight gap = no relational signal')
+        ax.legend()
+        fig.tight_layout(); fig.savefig(out_perm, dpi=150); plt.close(fig)
+
+    # JSON sidecar so the pipeline can pick up the numbers without re-parsing stdout.
+    with open(out.parent / 'metrics.json', 'w') as f:
+        json.dump(summary, f, indent=2)
 
     print(json.dumps(summary, indent=2))
     print(f'Wrote {out}')
+    if probes:
+        print(f'Wrote {out.parent / "cka_procrustes.png"}, {out.parent / "gw_permutation.png"}')
+    print(f'Wrote {out.parent / "metrics.json"}')
 
 
 # ---------- main ----------
