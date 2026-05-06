@@ -72,7 +72,6 @@ def setup_training_datasets(cfg: DictConfig) -> tuple[Dataset, DistributedSample
         dataset = MultiModalDataset([video], [audio])
     else:
         vgg = load_vgg_data(cfg, cfg.data.ExtractedVGG)
-
         audio_datasets = []
         for tag, data_cfg in [
             ('AudioCaps', cfg.data.AudioCaps),
