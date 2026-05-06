@@ -1,0 +1,64 @@
+#!/bin/bash
+#SBATCH --job-name=mma_xdataset_audio_only
+#SBATCH --output=logs/gw_xdataset_audio_only_%j.out
+#SBATCH --error=logs/gw_xdataset_audio_only_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=24:00:00
+#SBATCH --partition=acltr
+#SBATCH --gres=gpu:2
+#SBATCH --mail-user=edlu@itu.dk
+#SBATCH --mail-type=FAIL
+
+# Data-exposure control for xdataset_fgw. Pulls the same AudioCaps audio
+# batches and runs them through clap_proj, but applies ONLY the VICReg
+# collapse penalty -- no FGW, no text cost. Comparing the metrics of this
+# run to gw_xdataset_fgw isolates the FGW signal from the benefit of
+# simply exposing clap_proj to AudioCaps audio.
+
+set -e
+set -x
+
+PROJECT_DIR="$HOME/MMA/MMAudio"
+ENV_PATH="/home/edlu/miniconda3-25-5-1-1/envs/gwot"
+
+module load CUDA/12.1.1
+module load NCCL/2.18.3-GCCcore-12.3.0-CUDA-12.1.1
+module load Miniconda3/25.5.1-1
+source /opt/itu/easybuild/software/Miniconda3/25.5.1-1/etc/profile.d/conda.sh
+conda activate "$ENV_PATH"
+cd "$PROJECT_DIR"
+export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:${PYTHONPATH}}"
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+
+echo "Pre-warming torch import cache..."
+time python -c "import torch; print('torch', torch.__version__)"
+echo "Cache warm."
+
+mkdir -p logs output
+
+MODEL="${MODEL:-small_16k}"
+ITERS="${ITERS:-300000}"
+LAMBDA="${LAMBDA:-5e-3}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE}}"
+COMPILE="${COMPILE:-False}"
+COLLAPSE_PENALTY="${COLLAPSE_PENALTY:-vicreg}"
+M_AUDIOCAPS="${M_AUDIOCAPS:-32}"
+
+OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=2 "$PROJECT_DIR/src/train.py" \
+    exp_id="gw_xdataset_audio_only" \
+    model="$MODEL" \
+    num_iterations="$ITERS" \
+    batch_size="$BATCH_SIZE" \
+    eval_batch_size="$EVAL_BATCH_SIZE" \
+    compile="$COMPILE" \
+    gw_regularization.enabled=true \
+    gw_regularization.variant=xdataset_audio_only \
+    gw_regularization.lambda_gw="$LAMBDA" \
+    gw_regularization.collapse_penalty="$COLLAPSE_PENALTY" \
+    gw_regularization.xdataset_audiocaps_subsample="$M_AUDIOCAPS"
+
+echo "Done: gw_xdataset_audio_only"

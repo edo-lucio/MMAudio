@@ -44,6 +44,13 @@ AudioCaps:
   tsv: ../data/v1-16-memmap/audiocaps.tsv
   memmap_dir: ../data/v1-16-memmap/audiocaps
 
+# Cross-dataset FGW companion (Reading-B variant). Memmap is produced by
+# src/training/extract_audiocaps_features.py and contains both CLAP audio
+# embeddings and CLIP-text caption embeddings.
+AudioCapsXDataset:
+  memmap_dir: ./data/audiocaps/extracted/train
+  ids_tsv:    ./data/audiocaps/extracted/train/ids.tsv
+
 AudioSetSL:
   tsv: ../data/v1-16-memmap/audioset_sl.tsv
   memmap_dir: ../data/v1-16-memmap/audioset_sl

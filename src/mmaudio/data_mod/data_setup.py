@@ -179,6 +179,43 @@ def error_avoidance_collate(batch):
     return default_collate(batch)
 
 
+def setup_audiocaps_xdataset_loader(cfg: DictConfig):
+    """Companion AudioCaps loader for variant='xdataset_fgw'.
+
+    Returns ``(dataset, sampler, loader)`` or ``(None, None, None)`` if the
+    config block / memmap is not in place. The runner pulls a fresh batch
+    each step via itertools.cycle on this loader.
+    """
+    from pathlib import Path
+
+    from mmaudio.data_mod.extracted_audiocaps import ExtractedAudioCaps
+
+    block = cfg.data.get('AudioCapsXDataset', None)
+    if block is None:
+        log.info('AudioCapsXDataset block not present in config; skipping')
+        return None, None, None
+    memmap_dir = Path(block.memmap_dir)
+    if not (memmap_dir / 'meta.memmap').exists():
+        log.warning(f'AudioCaps memmap not found at {memmap_dir}; '
+                    f'xdataset_fgw will be a no-op')
+        return None, None, None
+    dataset = ExtractedAudioCaps(
+        memmap_dir=memmap_dir,
+        ids_tsv=block.get('ids_tsv', None),
+    )
+    batch_size = int(cfg.gw_regularization.get('xdataset_audiocaps_subsample',
+                                                cfg.batch_size))
+    sampler, loader = construct_loader(
+        dataset,
+        batch_size,
+        cfg.num_workers,
+        shuffle=True,
+        drop_last=True,
+        pin_memory=cfg.pin_memory,
+    )
+    return dataset, sampler, loader
+
+
 def construct_loader(dataset: Dataset,
                      batch_size: int,
                      num_workers: int,

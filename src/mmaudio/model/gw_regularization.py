@@ -190,6 +190,50 @@ def fused_gw_loss(
     return loss, T
 
 
+def fused_gw_loss_nm(
+    D_v: Tensor,    # (n, n)
+    D_a: Tensor,    # (m, m)
+    C: Tensor,      # (n, m)
+    alpha: float = 0.5,
+    num_iter: int = 5,
+    epsilon: float = 0.1,
+    inner_sinkhorn_iter: int = 20,
+) -> tuple[Tensor, Tensor]:
+    """Fused-GW with non-square coupling.
+
+    Same Sinkhorn-on-quadratic-objective structure as ``fused_gw_loss`` but
+    with separate uniform marginals on each side. Required for the
+    cross-dataset variant (Reading B), where the n VGGSound video samples
+    are coupled to a fresh batch of m AudioCaps audio samples per step.
+    """
+    n, m = D_v.shape[0], D_a.shape[0]
+    device, dtype = D_v.device, D_v.dtype
+
+    p = torch.full((n,), 1.0 / n, device=device, dtype=dtype)
+    q = torch.full((m,), 1.0 / m, device=device, dtype=dtype)
+    T = p.unsqueeze(1) * q.unsqueeze(0)              # (n, m)
+
+    for _ in range(num_iter):
+        G_gw = -2.0 * (D_v @ T @ D_a)                # (n, m)
+        G = alpha * G_gw + (1.0 - alpha) * C
+        logK = -G / epsilon
+        K = torch.exp(logK - logK.max())
+        u = torch.ones(n, device=device, dtype=dtype)
+        v = torch.ones(m, device=device, dtype=dtype)
+        for _ in range(inner_sinkhorn_iter):
+            u = p / (K @ v + 1e-8)
+            v = q / (K.transpose(0, 1) @ u + 1e-8)
+        T = u.unsqueeze(1) * K * v.unsqueeze(0)
+
+    # GW = p^T D_v^2 p + q^T D_a^2 q - 2 <D_v T D_a, T>
+    Dv2_p = (D_v * D_v) @ p
+    Da2_q = (D_a * D_a) @ q
+    gw = (Dv2_p * p).sum() + (Da2_q * q).sum() - 2.0 * (D_v @ T @ D_a * T).sum()
+    w = (C * T).sum()
+    loss = alpha * gw + (1.0 - alpha) * w
+    return loss, T
+
+
 def fused_got_loss(
     D_x: Tensor,
     D_y: Tensor,
@@ -340,6 +384,11 @@ def compute_gw_regularization(
     vicreg_target: str = "both",
     audio_encoder: str = "vae",
     clap_f_raw: Optional[Tensor] = None,
+    text_f_raw: Optional[Tensor] = None,
+    text_exist: Optional[Tensor] = None,
+    audiocaps_audio: Optional[Tensor] = None,
+    audiocaps_text: Optional[Tensor] = None,
+    xdataset_shuffle_c: bool = False,
 ) -> tuple[Tensor, Optional[Tensor], Tensor]:
     """Compute GW loss over the subset of the batch that has real video features.
 
@@ -373,7 +422,7 @@ def compute_gw_regularization(
         else:
             clap_sub = clap_f_raw.index_select(0, idx)
 
-    with torch.cuda.amp.autocast(enabled=False):
+    with torch.amp.autocast('cuda', enabled=False):
         clip_sub = clip_sub.float()
         x1_sub = x1_sub.float()
         if clap_sub is not None:
@@ -429,6 +478,129 @@ def compute_gw_regularization(
                 return zero, None, zero
             loss = gw_loss + vicreg_weight * ac
             return loss, T, ac.detach()
+
+        # xdataset_fgw: Reading-B cross-dataset alignment.
+        # V comes from this VGGSound batch (n samples). A comes from a fresh
+        # AudioCaps batch (m samples) supplied by the runner. The cross-modal
+        # cost matrix C is the cosine distance between class-label CLIP-text
+        # and AudioCaps-caption CLIP-text, both pooled to (·, text_dim).
+        # FGW with non-square coupling T:(n, m) is solved via fused_gw_loss_nm.
+        if variant == "xdataset_fgw":
+            if (audiocaps_audio is None
+                    or audiocaps_text is None
+                    or text_f_raw is None):
+                return zero, None, zero
+            clap_proj = getattr(network, "clap_proj", None)
+            if clap_proj is None:
+                raise AttributeError(
+                    "variant='xdataset_fgw' requires `clap_proj` on the "
+                    "network. Add `nn.Linear(512, hidden_dim)` to "
+                    "MMAudio.__init__ (same head used by the CLAP ablation)."
+                )
+
+            # Mask V side by (video_exist & text_exist); the FGW relies on
+            # both video features and class-label text features being valid.
+            text_sub = text_f_raw.index_select(0, idx)
+            if text_exist is not None:
+                te = text_exist.index_select(0, idx)
+                keep = te.nonzero(as_tuple=False).squeeze(-1)
+                if keep.numel() < min_batch:
+                    return zero, None, zero
+                clip_sub_nm = clip_sub.index_select(0, keep)
+                text_sub = text_sub.index_select(0, keep)
+            else:
+                clip_sub_nm = clip_sub
+
+            ac_audio = audiocaps_audio.float()
+            ac_text = audiocaps_text.float()
+            if ac_audio.shape[0] < min_batch:
+                return zero, None, zero
+
+            # V: pool VGGSound video tokens. detach if requested (matches
+            # how the other pooled variants are trained: clip_input_proj
+            # already gets gradient from the main FM loss).
+            v_tokens = network.clip_input_proj(clip_sub_nm)        # (n, t, d)
+            V = v_tokens.mean(dim=1)                                # (n, d)
+            if detach_video:
+                V = V.detach()
+
+            # A: project AudioCaps CLAP embeddings. clap_proj is the only
+            # learnable head receiving FGW gradients in this variant.
+            A = clap_proj(ac_audio)                                 # (m, d)
+
+            # Text axes: pool token sequences and L2-normalise. Text encoder
+            # is frozen; detach so no gradient flows into the C matrix.
+            T_v = F.normalize(text_sub.float().mean(dim=1), dim=-1).detach()
+            T_a = F.normalize(ac_text.mean(dim=1), dim=-1).detach()
+
+            D_v = _normalize_dist(pairwise_distances(V))
+            D_a = _normalize_dist(pairwise_distances(A))
+            C_cross = 1.0 - T_v @ T_a.transpose(0, 1)               # (n, m)
+
+            # Sanity-control ablation: permute the rows of C so the text
+            # supervision signal is destroyed but the FGW machinery, the
+            # data exposure, and the gradient pathway through clap_proj
+            # are byte-identical. A shuffled-C run that performs as well
+            # as the unshuffled one means the win came from data exposure
+            # alone, not from text-grounded relational alignment.
+            if xdataset_shuffle_c:
+                perm = torch.randperm(C_cross.shape[0], device=C_cross.device)
+                C_cross = C_cross[perm]
+
+            gw_loss, T = fused_gw_loss_nm(
+                D_v, D_a, C_cross,
+                alpha=alpha,
+                num_iter=num_sinkhorn_iter,
+                epsilon=epsilon,
+            )
+            if not torch.isfinite(gw_loss):
+                return zero, None, zero
+
+            # Collapse penalty applies to A (the trained clap_proj outputs).
+            # V is detached and frozen-text, so collapse is impossible there.
+            vc = zero
+            if vicreg_weight > 0.0:
+                vc = vicreg_loss(
+                    A, gamma=vicreg_gamma,
+                    var_weight=vicreg_var_weight,
+                    cov_weight=vicreg_cov_weight,
+                )
+            if not torch.isfinite(vc):
+                return zero, None, zero
+            loss = gw_loss + vicreg_weight * vc
+            return loss, T, (vicreg_weight * vc).detach()
+
+        # xdataset_audio_only: data-exposure control for xdataset_fgw.
+        # Pulls the same AudioCaps batch and runs the same clap_proj forward,
+        # then applies the collapse penalty *only* (no FGW, no text cost).
+        # Comparing this to xdataset_fgw isolates the FGW signal from the
+        # benefit of merely seeing AudioCaps data through clap_proj.
+        if variant == "xdataset_audio_only":
+            if audiocaps_audio is None:
+                return zero, None, zero
+            clap_proj = getattr(network, "clap_proj", None)
+            if clap_proj is None:
+                raise AttributeError(
+                    "variant='xdataset_audio_only' requires `clap_proj` "
+                    "on the network."
+                )
+            ac_audio = audiocaps_audio.float()
+            if ac_audio.shape[0] < min_batch:
+                return zero, None, zero
+            A = clap_proj(ac_audio)                                 # (m, d)
+            if vicreg_weight <= 0.0:
+                # No FGW and no penalty would mean no gradient at all;
+                # be explicit so the run isn't silently a no-op.
+                return zero, None, zero
+            vc = vicreg_loss(
+                A, gamma=vicreg_gamma,
+                var_weight=vicreg_var_weight,
+                cov_weight=vicreg_cov_weight,
+            )
+            if not torch.isfinite(vc):
+                return zero, None, zero
+            loss = vicreg_weight * vc
+            return loss, None, loss.detach()
 
         v, a = _extract_representations(
             network, variant, clip_sub, x1_sub,

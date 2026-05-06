@@ -141,6 +141,12 @@ class Runner:
         self.gw_cfg = cfg.get('gw_regularization', None)
         self.gw_enabled = bool(self.gw_cfg) and bool(self.gw_cfg.get('enabled', False))
 
+        # Companion AudioCaps loader for variant='xdataset_fgw'. Built lazily
+        # the first time it's pulled, so other variants pay no cost.
+        self._audiocaps_loader = None
+        self._audiocaps_iter = None
+        self._cfg_full = cfg
+
         # setting up logging
         self.log = log
         self.run_path = Path(run_path)
@@ -300,6 +306,28 @@ class Runner:
         mean_loss = loss.mean()
         return loss, mean_loss, t
 
+    def _next_audiocaps_batch(self):
+        """Pull a fresh AudioCaps batch for the cross-dataset FGW variant.
+
+        Lazily constructs the loader on first call, then cycles forever.
+        Returns None if the AudioCaps memmap is not configured (e.g. on
+        non-xdataset_fgw runs or when extraction has not been done yet).
+        """
+        if self._audiocaps_iter is not None:
+            try:
+                return next(self._audiocaps_iter)
+            except StopIteration:
+                self._audiocaps_iter = iter(self._audiocaps_loader)
+                return next(self._audiocaps_iter)
+        # first call: try to build it
+        from mmaudio.data_mod.data_setup import setup_audiocaps_xdataset_loader
+        _, _, loader = setup_audiocaps_xdataset_loader(self._cfg_full)
+        if loader is None:
+            return None
+        self._audiocaps_loader = loader
+        self._audiocaps_iter = iter(loader)
+        return next(self._audiocaps_iter)
+
     def train_pass(self, data, it: int = 0):
 
         if not self.for_training:
@@ -345,6 +373,16 @@ class Runner:
                 )
                 # normalized audio latent (same normalization used inside the network)
                 a_mean_norm = self.network.module.normalize(a_mean.clone())
+
+                # Cross-dataset variants pull a fresh AudioCaps batch each step.
+                ac_audio = ac_text = None
+                if str(self.gw_cfg.variant) in ('xdataset_fgw',
+                                                'xdataset_audio_only'):
+                    ac_batch = self._next_audiocaps_batch()
+                    if ac_batch is not None:
+                        ac_audio = ac_batch['audio_clap'].cuda(non_blocking=True)
+                        ac_text = ac_batch['text_features'].cuda(non_blocking=True)
+
                 gw_loss, _, ac_loss = compute_gw_regularization(
                     self.network.module,
                     variant=self.gw_cfg.variant,
@@ -355,6 +393,11 @@ class Runner:
                     num_sinkhorn_iter=self.gw_cfg.num_sinkhorn_iter,
                     epsilon=self.gw_cfg.epsilon,
                     alpha=self.gw_cfg.alpha,
+                    text_f_raw=text_f,
+                    text_exist=text_exist,
+                    audiocaps_audio=ac_audio,
+                    audiocaps_text=ac_text,
+                    xdataset_shuffle_c=bool(self.gw_cfg.get('xdataset_shuffle_c', False)),
                     # Single switch: route the configured weights to exactly
                     # one branch so the two penalties never silently stack.
                     anticollapse_weight=(

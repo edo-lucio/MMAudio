@@ -114,6 +114,15 @@ gw_regularization:
   #   3. MMAudio.__init__ adding `self.clap_proj = nn.Linear(512, hidden_dim)`
   #      (or a small MLP) when this flag is 'clap'.
   audio_encoder: vae        # vae | clap
+  # Cross-dataset FGW (variant='xdataset_fgw'): per step, pull a fresh batch
+  # of m AudioCaps clips and align this batch's VGGSound video features
+  # against AudioCaps audio (CLAP) features under a text-cosine cross-cost
+  # in the shared CLIP-text space. Independent of audio_encoder.
+  xdataset_audiocaps_subsample: 32
+  # Sanity ablation: when true, permute the rows of the cross-cost matrix C
+  # so the text supervision signal is destroyed but the FGW machinery and
+  # data exposure are unchanged. Used by gw_xdataset_fgw_shuffle.
+  xdataset_shuffle_c: false
 
 # checkpoint paths to external modules
 vae_16k_ckpt: ./ext_weights/v1-16.pth

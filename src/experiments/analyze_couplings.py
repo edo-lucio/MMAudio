@@ -120,6 +120,10 @@ def main():
 
     # heatmap: top-20 classes by count, show mean coupling between class pairs
     top = [c for c, _ in sorted(class_counts.items(), key=lambda x: -x[1])[:20]]
+    if len(top) < 2:
+        print(f'[warn] only {len(top)} class(es) in evaluated set — '
+              f'skipping class_pair_heatmap.png')
+        return
     H = np.zeros((len(top), len(top)))
     for i, ci in enumerate(top):
         for j, cj in enumerate(top):
@@ -127,7 +131,10 @@ def main():
             H[i, j] = float(np.mean(vals)) if vals else 0.0
 
     fig, ax = plt.subplots(figsize=(10, 9))
-    im = ax.imshow(H, cmap='viridis')
+    if H.max() == H.min():
+        im = ax.imshow(H, cmap='viridis', vmin=0.0, vmax=max(H.max(), 1e-12))
+    else:
+        im = ax.imshow(H, cmap='viridis')
     ax.set_xticks(range(len(top))); ax.set_xticklabels(top, rotation=90, fontsize=7)
     ax.set_yticks(range(len(top))); ax.set_yticklabels(top, fontsize=7)
     fig.colorbar(im, ax=ax)
